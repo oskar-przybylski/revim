@@ -25,8 +25,6 @@
 //! cs.apply(&mut text);
 //! assert_eq!(text.to_string(), "hello Revim");
 //! ```
-//!
-//! Implementation notes: `docs/kod/revim-core/change.rs.md`.
 
 use std::cmp::Ordering;
 
