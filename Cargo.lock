@@ -1199,8 +1199,19 @@ dependencies = [
  "crossterm",
  "futures",
  "ratatui",
+ "revim-core",
  "revim-kernel",
+ "revim-ui",
  "tokio",
+]
+
+[[package]]
+name = "revim-ui"
+version = "0.1.0"
+dependencies = [
+ "ratatui",
+ "revim-core",
+ "revim-kernel",
 ]
 
 [[package]]

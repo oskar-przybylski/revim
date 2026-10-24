@@ -19,6 +19,18 @@
 
 use ropey::{Rope, RopeSlice};
 
+/// A cursor movement, independent of the key that triggered it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Motion {
+    /// One char left (`h`), see [`left`].
+    Left,
+    /// One char right (`l`), see [`right`].
+    Right,
+    /// One line up (`k`), see [`up`].
+    Up,
+    /// One line down (`j`), see [`down`].
+    Down,
+}
 /// `h`: moves one char left; does not wrap to the previous line.
 ///
 /// ```
