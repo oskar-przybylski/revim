@@ -1,5 +1,4 @@
 //! Windows: views of documents.
-
 use revim_core::selection::Selection;
 use slotmap::new_key_type;
 
@@ -13,6 +12,7 @@ new_key_type! {
 /// A view of one document: which document is shown, where the cursor is and how it is scrolled.
 ///
 /// Several windows may show the same document, each with its own cursor and scroll.
+#[expect(dead_code)]
 pub struct Window {
     /// The shown document.
     doc: DocId,

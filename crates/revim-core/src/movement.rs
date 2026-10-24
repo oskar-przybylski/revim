@@ -259,8 +259,8 @@ mod tests {
     fn down_and_up_skip_carriage_return_when_clamping() {
         // a0 b1 c2 d3 \r4 \n5 | a6 b7 \r8 \n9 | a10 b11 c12 d13 \r14 \n15
         let r = Rope::from_str("abcd\r\nab\r\nabcd\r\n");
-        assert_eq!(down(&r, 3, 3), 7);   // 'b', not '\r'
-        assert_eq!(down(&r, 7, 3), 13);  // back to column 3
+        assert_eq!(down(&r, 3, 3), 7); // 'b', not '\r'
+        assert_eq!(down(&r, 7, 3), 13); // back to column 3
         assert_eq!(up(&r, 13, 3), 7);
         assert_eq!(column(&r, 13), 3);
     }
