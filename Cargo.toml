@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace]
-members = ["crates/*"]
-default-members = ["crates/*"]
+members = ["crates/*", "."]
+default-members = ["crates/*", "."]
 resolver = "3"
 
 
@@ -17,3 +17,5 @@ panic = "unwind" # this is needed for module fail isolation
 
 
 [dependencies]
+tokio = { version = "1.54.1", features = ["rt", "macros"] }
+revim-runtime = { path = "crates/revim-runtime" }
