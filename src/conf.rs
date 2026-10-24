@@ -1,4 +1,2 @@
-
-pub fn config() {
-
-}
+#[expect(dead_code)]
+pub fn config() {}
