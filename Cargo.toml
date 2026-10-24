@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace]
-members = ["crates/*", "."]
-default-members = ["crates/*", "."]
+members = ["crates/*", "." , "modules/*"]
+default-members = ["crates/*", ".", "modules/*"]
 resolver = "3"
 
 
@@ -19,3 +19,8 @@ panic = "unwind" # this is needed for module fail isolation
 [dependencies]
 tokio = { version = "1.54.1", features = ["rt", "macros"] }
 revim-runtime = { path = "crates/revim-runtime" }
+revim-api = { path = "crates/revim-api" }
+
+#modules
+mod-builtin = {path = "modules/mod-builtin"}
+mod-vim = {path = "modules/mod-vim"}

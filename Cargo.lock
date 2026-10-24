@@ -721,6 +721,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "mod-builtin"
+version = "0.1.0"
+dependencies = [
+ "revim-api",
+]
+
+[[package]]
+name = "mod-vim"
+version = "0.1.0"
+dependencies = [
+ "revim-api",
+]
+
+[[package]]
 name = "nix"
 version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1172,8 +1186,19 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 name = "revim"
 version = "0.1.0"
 dependencies = [
+ "mod-builtin",
+ "mod-vim",
+ "revim-api",
  "revim-runtime",
  "tokio",
+]
+
+[[package]]
+name = "revim-api"
+version = "0.1.0"
+dependencies = [
+ "revim-core",
+ "revim-kernel",
 ]
 
 [[package]]
@@ -1199,7 +1224,6 @@ dependencies = [
  "crossterm",
  "futures",
  "ratatui",
- "revim-core",
  "revim-kernel",
  "revim-ui",
  "tokio",

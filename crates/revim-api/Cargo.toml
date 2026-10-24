@@ -1,0 +1,8 @@
+[package]
+name = "revim-api"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+revim-core = {path="../revim-core"}
+revim-kernel = {path="../revim-kernel"}

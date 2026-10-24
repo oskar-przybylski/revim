@@ -27,6 +27,7 @@ pub struct EditorState {
     docs: SlotMap<DocId, Document>,
     windows: SlotMap<WindowId, Window>,
     focused: WindowId,
+    quit_requested: bool,
 }
 
 impl EditorState {
@@ -47,21 +48,46 @@ impl EditorState {
             docs,
             windows,
             focused,
+            quit_requested: false,
         }
     }
     /// The document of the focused window.
     pub fn focused_doc(&self) -> &Document {
         &self.docs[self.windows[self.focused].doc()]
     }
+    /// Id of the document of the focused window.
+    pub fn focused_doc_id(&self) -> DocId {
+        self.focused_window().doc()
+    }
     /// The window that is currently focused (shown and receiving input).
     pub fn focused_window(&self) -> &Window {
         &self.windows[self.focused]
     }
-
+    /// Id of the focused window.
+    pub fn focused_window_id(&self) -> WindowId {
+        self.focused
+    }
+    /// The window with this id, or `None` if it does not exist (e.g. was closed).
+    pub fn window(&self, id: WindowId) -> Option<&Window> {
+        self.windows.get(id)
+    }
+    /// The document with this id, or `None` if it does not exist (e.g. was closed).
+    pub fn document(&self, id: DocId) -> Option<&Document> {
+        self.docs.get(id)
+    }
     /// Sets how many lines the focused window shows. Call it whenever the screen size is
     /// known (e.g. before drawing each frame), so that scrolling keeps the cursor visible.
     pub fn set_view_height(&mut self, height: usize) {
         self.windows[self.focused].set_height(height);
+    }
+
+    /// Whether quitting was requested (see [`Ctx::quit`](crate::ctx::Ctx::quit)).
+    pub fn should_quit(&self) -> bool {
+        self.quit_requested
+    }
+
+    pub(crate) fn request_quit(&mut self) {
+        self.quit_requested = true;
     }
 
     /// Moves the cursor of the focused window.
@@ -103,6 +129,23 @@ mod tests {
         state.move_cursor(Motion::Down);
         state.move_cursor(Motion::Right);
         assert_eq!(state.focused_window().cursor(), 4); // 'd'
+    }
+
+    #[test]
+    fn window_and_document_by_id() {
+        let state = state("hello\n");
+        let win = state.window(state.focused_window_id()).unwrap();
+        assert_eq!(win.cursor(), 0);
+        let doc = state.document(state.focused_doc_id()).unwrap();
+        assert_eq!(doc.text().to_string(), "hello\n");
+    }
+
+    #[test]
+    fn quit_is_not_requested_initially() {
+        let mut state = state("");
+        assert!(!state.should_quit());
+        state.request_quit();
+        assert!(state.should_quit());
     }
 
     #[test]
