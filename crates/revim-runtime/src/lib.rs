@@ -58,9 +58,11 @@ async fn event_loop(terminal: &mut DefaultTerminal, editor: &mut Editor) -> io::
     loop {
         terminal.draw(|f| {
             let area = f.area();
-            editor.state_mut().set_view_height(area.height as usize);
+            let h = area.height as usize;
+            editor.state_mut().set_view_height(h);
+            let gutters = editor.gutter_columns(h);
             let state = editor.state();
-            let view = WindowView::new(state.focused_window(), state.focused_doc());
+            let view = WindowView::new(state.focused_window(), state.focused_doc(), &gutters);
             f.render_widget(&view, area);
             if let Some(pos) = view.cursor_position(area) {
                 f.set_cursor_position(pos);

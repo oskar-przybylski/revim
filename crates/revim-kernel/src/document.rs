@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use revim_core::movement::line_count;
 use ropey::Rope;
 
 /// Address of a document: where its text comes from and where it is saved.
@@ -84,6 +85,10 @@ impl Document {
     pub fn version(&self) -> u64 {
         self.version
     }
+    /// Number of lines as Vim counts them: a trailing line ending does not start a new line.
+    pub fn line_count(&self) -> usize {
+        line_count(&self.text)
+    }
 }
 
 #[cfg(test)]
@@ -96,6 +101,13 @@ mod tests {
         assert_eq!(doc.text().to_string(), "fn main() {}\n");
         assert_eq!(doc.uri(), Some(&Uri::File("a.rs".into())));
         assert_eq!(doc.version(), 0);
+    }
+
+    #[test]
+    fn line_count_ignores_the_trailing_line_ending() {
+        assert_eq!(Document::from_text(None, "a\nb\n").line_count(), 2);
+        assert_eq!(Document::from_text(None, "a\nb").line_count(), 2);
+        assert_eq!(Document::scratch().line_count(), 1);
     }
 
     #[test]

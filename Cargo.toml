@@ -24,3 +24,4 @@ revim-api = { path = "crates/revim-api" }
 #modules
 mod-builtin = {path = "modules/mod-builtin"}
 mod-vim = {path = "modules/mod-vim"}
+mod-gutter = {path = "modules/mod-gutter"}

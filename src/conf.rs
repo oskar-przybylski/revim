@@ -2,7 +2,11 @@ use revim_api::Module;
 
 /// Modules loaded at startup, in order. Remove a line to disable a module;
 pub fn modules() -> Vec<Box<dyn Module>> {
-    vec![Box::new(mod_builtin::Builtin), Box::new(mod_vim::Vim)]
+    vec![
+        Box::new(mod_builtin::Builtin),
+        Box::new(mod_vim::Vim),
+        Box::new(mod_gutter::Gutter),
+    ]
 }
 
 #[cfg(test)]

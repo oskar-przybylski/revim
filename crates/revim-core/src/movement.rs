@@ -133,7 +133,16 @@ fn pos_in_line(text: &Rope, line_idx: usize, col: usize) -> usize {
 }
 
 /// Number of lines as Vim counts them: a trailing line ending does not start a new line.
-fn line_count(text: &Rope) -> usize {
+///
+/// ```
+/// use revim_core::movement::line_count;
+/// use ropey::Rope;
+///
+/// assert_eq!(line_count(&Rope::from_str("a\nb\n")), 2);
+/// assert_eq!(line_count(&Rope::from_str("a\nb")), 2);
+/// assert_eq!(line_count(&Rope::from_str("")), 1); // an empty document has one empty line
+/// ```
+pub fn line_count(text: &Rope) -> usize {
     let n = text.len_lines();
     if n > 1 && text.char(text.len_chars() - 1) == '\n' {
         n - 1

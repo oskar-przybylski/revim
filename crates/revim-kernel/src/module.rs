@@ -6,6 +6,7 @@ use crate::{
     command::{Command, CommandRegistry},
     ctx::Ctx,
     event::Event,
+    gutter::{GutterProvider, GutterProviderRegistry},
     key::{Key, KeyParseError, parse_key},
     keymap::{Keymap, Mode},
 };
@@ -14,7 +15,7 @@ use crate::{
 pub trait Module: 'static {
     /// Short unique id, used as the prefix of the module's command names and in error messages.
     fn id(&self) -> &'static str;
-    /// Called once at startup: register commands and key bindings through `r`.
+    /// Called once at startup: register commands, key bindings and gutter columns through `r`.
     fn register(&mut self, r: &mut Registrar);
     /// Called for every [`Event`]. The default does nothing.
     fn on_event(&mut self, _event: &Event, _cx: &mut Ctx) {}
@@ -37,6 +38,7 @@ pub struct Registrar<'a> {
     module: &'static str,
     commands: &'a mut CommandRegistry,
     keymap: &'a mut Keymap,
+    gutters: &'a mut GutterProviderRegistry,
     errors: &'a mut Vec<RegisterError>,
 }
 impl<'a> Registrar<'a> {
@@ -45,12 +47,14 @@ impl<'a> Registrar<'a> {
         module: &'static str,
         commands: &'a mut CommandRegistry,
         keymap: &'a mut Keymap,
+        gutters: &'a mut GutterProviderRegistry,
         errors: &'a mut Vec<RegisterError>,
     ) -> Self {
         Self {
             module,
             commands,
             keymap,
+            gutters,
             errors,
         }
     }
@@ -93,6 +97,12 @@ impl<'a> Registrar<'a> {
                 });
             }
         }
+    }
+
+    /// Adds a gutter column drawn by `provider`. Columns are drawn left to right in the order
+    /// they are registered, across all modules.
+    pub fn gutter(&mut self, provider: impl GutterProvider) {
+        self.gutters.push(self.module, Box::new(provider));
     }
 
     fn error(&mut self, kind: RegisterErrorKind) {
