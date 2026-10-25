@@ -6,6 +6,7 @@ use crate::{
     command::CommandRegistry,
     ctx::Ctx,
     event::{Effect, Event},
+    gutter::{GutterColumn, GutterContext, GutterProviderRegistry},
     key::Key,
     keymap::{Keymap, Mode},
     module::{Module, ModuleFailure, RegisterError, RegisterErrorKind, Registrar},
@@ -34,6 +35,7 @@ pub struct Editor {
     failures: Vec<ModuleFailure>,
     commands: CommandRegistry,
     keymap: Keymap,
+    gutters: GutterProviderRegistry,
     effects: VecDeque<Effect>,
     mode: Mode,
 }
@@ -51,6 +53,7 @@ impl Editor {
     ) -> Result<Self, Vec<RegisterError>> {
         let mut commands = CommandRegistry::default();
         let mut keymap = Keymap::default();
+        let mut gutters = GutterProviderRegistry::default();
         let mut errors: Vec<RegisterError> = Vec::new();
         modules.iter_mut().for_each(|m| {
             if let Err(message) = run_guarded(|| {
@@ -58,6 +61,7 @@ impl Editor {
                     m.id(),
                     &mut commands,
                     &mut keymap,
+                    &mut gutters,
                     &mut errors,
                 ))
             }) {
@@ -110,6 +114,7 @@ impl Editor {
             failures: Vec::new(),
             commands,
             keymap,
+            gutters,
             effects,
             mode: Mode::Normal,
         };
@@ -193,6 +198,49 @@ impl Editor {
     /// Modules that panicked and were disabled, in the order it happened.
     pub fn failures(&self) -> &[ModuleFailure] {
         &self.failures
+    }
+
+    /// Asks every gutter provider for its column for the focused window drawn `height` rows
+    /// high, in registration order.
+    ///
+    /// Each column has one cell per visible line, starting at the window's scroll position and
+    /// ending at the last line of the document — rows past the end get no cells. Columns of
+    /// width 0 are left out. Providers of disabled modules are skipped; a provider that panics
+    /// disables its module and its column is left out.
+    pub fn gutter_columns(&mut self, height: usize) -> Vec<GutterColumn> {
+        let doc = self.state.focused_doc();
+        let window = self.state.focused_window();
+        let cx = GutterContext { doc, window };
+
+        // only lines that exist: no numbers below the end of the file
+        let first = window.scroll();
+        let last = (first + height).min(doc.line_count());
+
+        let mut columns = Vec::new();
+        for (module, provider) in self.gutters.providers() {
+            if self.disabled_modules.contains(module) {
+                continue;
+            }
+            let column = run_guarded(|| {
+                let width = provider.width(&cx);
+                // width 0 hides the column: no cells to ask for
+                (width > 0).then(|| GutterColumn {
+                    width,
+                    cells: (first..last).map(|line| provider.cell(&cx, line)).collect(),
+                })
+            });
+            match column {
+                Ok(Some(column)) => columns.push(column),
+                Ok(None) => {}
+                Err(message) => record_failure(
+                    &mut self.disabled_modules,
+                    &mut self.failures,
+                    module,
+                    message,
+                ),
+            }
+        }
+        columns
     }
 }
 
@@ -561,5 +609,147 @@ mod tests {
 
         editor.handle_key(Key::Char('b'));
         assert_eq!(boom.handler_calls.get(), 0); // nor its commands
+    }
+
+    // ----- gutter -----
+
+    use crate::gutter::{GutterCell, GutterProvider, Highlight};
+
+    /// Shows the 0-based line index, prefixed with its own tag.
+    struct LineIndex(&'static str);
+    impl GutterProvider for LineIndex {
+        fn width(&self, _cx: &GutterContext) -> u16 {
+            2
+        }
+        fn cell(&self, _cx: &GutterContext, line: usize) -> GutterCell {
+            GutterCell {
+                text: format!("{}{line}", self.0),
+                highlight: Highlight::Normal,
+            }
+        }
+    }
+
+    /// Panics on the first cell.
+    struct Panics;
+    impl GutterProvider for Panics {
+        fn width(&self, _cx: &GutterContext) -> u16 {
+            1
+        }
+        fn cell(&self, _cx: &GutterContext, _line: usize) -> GutterCell {
+            panic!("gutter failed")
+        }
+    }
+
+    fn gutter_editor(text: &str, modules: Vec<Box<dyn Module>>) -> Editor {
+        let mut all: Vec<Box<dyn Module>> = vec![Box::new(TestModule("editor", quit))];
+        all.extend(modules);
+        let state = EditorState::with_document(Document::from_text(None, text));
+        Editor::new(state, all).unwrap()
+    }
+
+    /// The texts of each column's cells.
+    fn texts(columns: &[GutterColumn]) -> Vec<Vec<&str>> {
+        columns
+            .iter()
+            .map(|c| c.cells.iter().map(|cell| cell.text.as_str()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn gutter_columns_come_in_registration_order() {
+        let mut editor = gutter_editor(
+            "a\nb\n",
+            vec![
+                Box::new(TestModule("first", |r| r.gutter(LineIndex("a")))),
+                Box::new(TestModule("second", |r| {
+                    r.gutter(LineIndex("b"));
+                    r.gutter(LineIndex("c"));
+                })),
+            ],
+        );
+        let columns = editor.gutter_columns(2);
+        assert_eq!(texts(&columns), [["a0", "a1"], ["b0", "b1"], ["c0", "c1"]]);
+        assert!(columns.iter().all(|c| c.width == 2));
+    }
+
+    #[test]
+    fn gutter_cells_only_for_lines_that_exist() {
+        let mut editor = gutter_editor(
+            "a\nb\n",
+            vec![Box::new(TestModule("g", |r| r.gutter(LineIndex(""))))],
+        );
+        // 2 lines in a 5 rows high window; no cell for the empty line after the last `\n`
+        assert_eq!(texts(&editor.gutter_columns(5)), [["0", "1"]]);
+        assert_eq!(texts(&editor.gutter_columns(1)), [["0"]]);
+    }
+
+    #[test]
+    fn gutter_cells_start_at_the_scroll_position() {
+        let mut editor = gutter_editor(
+            "a\nb\nc\nd\n",
+            vec![Box::new(TestModule("g", |r| r.gutter(LineIndex(""))))],
+        );
+        editor.state_mut().set_view_height(2);
+        for _ in 0..3 {
+            editor.state_mut().move_cursor(Motion::Down); // cursor on "d", scrolled by 2
+        }
+        assert_eq!(texts(&editor.gutter_columns(2)), [["2", "3"]]);
+    }
+
+    /// Hidden (width 0); fails the test if asked for a cell.
+    struct Hidden;
+    impl GutterProvider for Hidden {
+        fn width(&self, _cx: &GutterContext) -> u16 {
+            0
+        }
+        fn cell(&self, _cx: &GutterContext, _line: usize) -> GutterCell {
+            panic!("cell of a hidden column")
+        }
+    }
+
+    #[test]
+    fn zero_width_column_is_left_out() {
+        let mut editor = gutter_editor(
+            "a\n",
+            vec![Box::new(TestModule("g", |r| {
+                r.gutter(Hidden);
+                r.gutter(LineIndex(""));
+            }))],
+        );
+        assert_eq!(texts(&editor.gutter_columns(1)), [["0"]]);
+        assert!(editor.failures().is_empty()); // `cell` was not called
+    }
+
+    #[test]
+    fn panicking_gutter_provider_disables_its_module() {
+        let mut editor = gutter_editor(
+            "a\n",
+            vec![
+                Box::new(TestModule("boom", |r| r.gutter(Panics))),
+                Box::new(TestModule("g", |r| r.gutter(LineIndex("")))),
+            ],
+        );
+        // the other module's column is still there
+        assert_eq!(texts(&editor.gutter_columns(1)), [["0"]]);
+        assert_eq!(editor.failures(), [failure("boom", "gutter failed")]);
+
+        // not called again: no second failure
+        assert_eq!(texts(&editor.gutter_columns(1)), [["0"]]);
+        assert_eq!(editor.failures().len(), 1);
+    }
+
+    #[test]
+    fn module_disabled_elsewhere_loses_its_gutter_column() {
+        let mut editor = gutter_editor(
+            "a\n",
+            vec![Box::new(TestModule("boom", |r| {
+                r.command("boom.now", "", |_| panic!("handler failed"));
+                r.keymap(Mode::Normal, "b", "boom.now");
+                r.gutter(LineIndex(""));
+            }))],
+        );
+        assert_eq!(editor.gutter_columns(1).len(), 1);
+        editor.handle_key(Key::Char('b')); // the command panics → module disabled
+        assert!(editor.gutter_columns(1).is_empty());
     }
 }

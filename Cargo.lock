@@ -728,6 +728,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "mod-gutter"
+version = "0.1.0"
+dependencies = [
+ "revim-api",
+]
+
+[[package]]
 name = "mod-vim"
 version = "0.1.0"
 dependencies = [
@@ -1187,6 +1194,7 @@ name = "revim"
 version = "0.1.0"
 dependencies = [
  "mod-builtin",
+ "mod-gutter",
  "mod-vim",
  "revim-api",
  "revim-runtime",
