@@ -13,6 +13,8 @@ pub struct Command {
     pub name: String,
     /// Short description shown in key hints and the command palette.
     pub desc: String,
+    /// Id of the module that registered the command (disabled together with it).
+    pub(crate) module: &'static str,
     pub(crate) handler: CommandFn,
 }
 
@@ -49,6 +51,7 @@ mod tests {
         Command {
             name: name.into(),
             desc: desc.into(),
+            module: "test",
             handler: Box::new(|_| {}),
         }
     }

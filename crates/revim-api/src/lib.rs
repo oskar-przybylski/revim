@@ -1,7 +1,8 @@
 //! API for writing Revim modules. A module depends on this crate only.
 //!
 //! # Modules
-//! Everything the editor can do (moving the cursor, quitting, drawing gutter, statusline etc.) is provided by a [`Module`].
+//! Everything the editor can do (moving the cursor, quitting, drawing the gutter, statusline
+//! etc.) is provided by a [`Module`].
 //!
 //! Packages starting with revim-* are core of the project and are responsible for setting up async runtime,
 //! basic editor functionality, drawing ui, loading modules and dispatching events to module handlers.
@@ -10,17 +11,19 @@
 //! Module is a self contained piece of functionality that has access to editor state with [`Ctx`] (e.g. focused buffer content)
 //! and can use that to interact with the editor.
 //! Modules can: provide commands (functions using [`Ctx`]) and keybinds that trigger those functions,
-//! execute other modules commands, and optionally react to [`Event`]s such as opend document or mouse moved etc.
+//! execute other modules' commands, and optionally react to [`Event`]s such as an opened document
+//! or a moved cursor.
 //!
 //! Modules are listed in `src/conf.rs` of the editor; removing a line disables a module.
 //!
-//! Module panic is isolated. If module panics inside a handler it won't kill the whole editor,
-//! only the module that caused panic will be flagged as disabled and later after mod-notify has been added
-//! there will be popup message on screen for user.
+//! Module panics are isolated. If a module panics while registering, the editor reports it as
+//! a [`RegisterError`] and does not start. If it panics in a command or event handler, the
+//! editor keeps running and only that module is disabled — its commands and event handler are
+//! not called again. (Later `mod-notify` will show a message on screen.)
 //!
-//! The isolation however is not full, if module creates for example a stack overflow or call abort()
-//! it will end whole editor process. Full isolation requires WASM that is not very performant.
-//! Module authors are responsible for testing thier modules so that no global panic happens.
+//! The isolation however is not full: if a module causes for example a stack overflow or calls
+//! `abort()`, it ends the whole editor process. Full isolation requires WASM that is not very performant.
+//! Module authors are responsible for testing their modules so that this does not happen.
 //!
 //! # Conventions
 //!

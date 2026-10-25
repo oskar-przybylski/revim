@@ -20,6 +20,17 @@ pub trait Module: 'static {
     fn on_event(&mut self, _event: &Event, _cx: &mut Ctx) {}
 }
 
+/// A module that panicked and was disabled.
+#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Display` gives `[module] message`.
+pub struct ModuleFailure {
+    /// Id of the module that panicked.
+    pub module: &'static str,
+    /// The panic message.
+    pub message: String,
+}
+
 /// Collects what a module adds while it registers. Errors are collected, not returned,
 /// so all problems of all modules are reported at once.
 pub struct Registrar<'a> {
@@ -50,6 +61,7 @@ impl<'a> Registrar<'a> {
         let cmd = Command {
             name: name.to_string(),
             desc: desc.to_string(),
+            module: self.module,
             handler: Box::new(handler),
         };
         if !self.commands.add(cmd) {
@@ -130,6 +142,8 @@ pub enum RegisterErrorKind {
     },
     /// No module registered `editor.quit`, so there would be no way to quit.
     MissingQuitCommand,
+    /// The module panicked in [`Module::register`]; holds the panic message.
+    ModulePanicked { message: String },
 }
 
 impl fmt::Display for RegisterError {
@@ -158,7 +172,16 @@ impl fmt::Display for RegisterError {
             RegisterErrorKind::MissingQuitCommand => f.write_str(
                 "command `editor.quit` is not registered, the editor could not be closed",
             ),
+            RegisterErrorKind::ModulePanicked { message } => {
+                write!(f, "panicked while registering: {message}")
+            }
         }
+    }
+}
+
+impl fmt::Display for ModuleFailure {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "[{}] {}", self.module, self.message)
     }
 }
 
