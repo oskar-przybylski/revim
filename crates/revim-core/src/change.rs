@@ -8,7 +8,7 @@
 //! All positions and lengths are counted in **chars**, never bytes.
 //!
 //! Heavily inspired by Helix text editor
-//! https://github.com/helix-editor/helix/blob/master/helix-core/src/transaction.rs
+//! <https://github.com/helix-editor/helix/blob/master/helix-core/src/transaction.rs>
 //! props for creators of this idea
 //!
 //! ```

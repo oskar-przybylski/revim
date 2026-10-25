@@ -1,18 +1,26 @@
 //! API for writing Revim modules. A module depends on this crate only.
 //!
 //! # Modules
+//! Everything the editor can do (moving the cursor, quitting, drawing gutter, statusline etc.) is provided by a [`Module`].
 //!
-//! Everything the editor can do — moving the cursor, quitting, and later the statusline,
-//! git or LSP — is provided by a [`Module`]. A module:
+//! Packages starting with revim-* are core of the project and are responsible for setting up async runtime,
+//! basic editor functionality, drawing ui, loading modules and dispatching events to module handlers.
 //!
-//! - registers **commands** — named actions such as `vim.move.down` — and **key bindings**
-//!   that run them, in [`Module::register`] through the [`Registrar`],
-//! - changes the editor from command handlers through [`Ctx`]: read the state with
-//!   [`Ctx::state`], move the cursor with [`Ctx::move_cursor`], run another command with
-//!   [`Ctx::exec`], quit with [`Ctx::quit`],
-//! - optionally reacts to [`Event`]s in [`Module::on_event`].
+//! Everything else like LSP, git integration, vim motions, net buffers etc. will be provided by specialized modules.
+//! Module is a self contained piece of functionality that has access to editor state with [`Ctx`] (e.g. focused buffer content)
+//! and can use that to interact with the editor.
+//! Modules can: provide commands (functions using [`Ctx`]) and keybinds that trigger those functions,
+//! execute other modules commands, and optionally react to [`Event`]s such as opend document or mouse moved etc.
 //!
 //! Modules are listed in `src/conf.rs` of the editor; removing a line disables a module.
+//!
+//! Module panic is isolated. If module panics inside a handler it won't kill the whole editor,
+//! only the module that caused panic will be flagged as disabled and later after mod-notify has been added
+//! there will be popup message on screen for user.
+//!
+//! The isolation however is not full, if module creates for example a stack overflow or call abort()
+//! it will end whole editor process. Full isolation requires WASM that is not very performant.
+//! Module authors are responsible for testing thier modules so that no global panic happens.
 //!
 //! # Conventions
 //!
