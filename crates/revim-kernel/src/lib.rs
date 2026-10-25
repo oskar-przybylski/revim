@@ -3,7 +3,8 @@
 //! Holds documents ([`document::Document`]), windows showing them ([`window::Window`]) and the
 //! editor state that owns both ([`state::EditorState`]), plus the module system: modules
 //! ([`module::Module`]) register commands and key bindings, and [`editor::Editor`] runs them.
-//! Modules use this crate through `revim-api`; the UI reads the state from it.
+//! Module code runs isolated ([`panic`](mod@crate::panic)): a panicking module is disabled, the editor keeps
+//! running. Modules use this crate through `revim-api`; the UI reads the state from it.
 
 pub mod command;
 pub mod ctx;
@@ -13,5 +14,6 @@ pub mod event;
 pub mod key;
 pub mod keymap;
 pub mod module;
+pub mod panic;
 pub mod state;
 pub mod window;

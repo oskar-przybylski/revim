@@ -3,8 +3,6 @@
 use revim_api::{Mode, Module, Registrar};
 
 /// Core editor commands: `editor.quit` (`<C-q>`).
-///
-/// Must be in the module list — the kernel refuses to start without `editor.quit`.
 pub struct Builtin;
 
 impl Module for Builtin {

@@ -1,7 +1,6 @@
 use revim_api::Module;
 
 /// Modules loaded at startup, in order. Remove a line to disable a module;
-/// `Builtin` must stay — it provides `editor.quit`.
 pub fn modules() -> Vec<Box<dyn Module>> {
     vec![Box::new(mod_builtin::Builtin), Box::new(mod_vim::Vim)]
 }

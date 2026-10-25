@@ -10,6 +10,7 @@ use revim_kernel::{
     editor::Editor,
     key::Key,
     module::Module,
+    panic::in_guarded_mode,
     state::EditorState,
 };
 use revim_ui::window_view::WindowView;
@@ -20,6 +21,10 @@ use revim_ui::window_view::WindowView;
 /// document with that path) and registers the modules — both before taking over the
 /// terminal, so errors are printed normally. Then runs the event loop and restores the
 /// terminal afterwards, also when the loop fails.
+///
+/// A panic in module code does not touch the terminal: the module is disabled and the editor
+/// keeps running; disabled modules are listed after the terminal is restored. Any other panic
+/// restores the terminal and ends the editor.
 ///
 /// # Errors
 /// If the file cannot be read (other than not existing), if module registration fails
@@ -33,8 +38,17 @@ pub async fn run(path: Option<PathBuf>, modules: Vec<Box<dyn Module>>) -> io::Re
     })?;
 
     let mut terminal = ratatui::init();
+    // Wraps ratatui's hook (installed by `init`), which restores the terminal. Module panics
+    // are caught by the kernel, so the terminal must stay as it is for them.
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if !in_guarded_mode() {
+            previous(info)
+        }
+    }));
     let result = event_loop(&mut terminal, &mut editor).await;
     ratatui::restore();
+    editor.failures().iter().for_each(|f| eprintln!("{f}"));
     result
 }
 

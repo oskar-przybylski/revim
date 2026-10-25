@@ -1,6 +1,6 @@
 //! The running editor: state, modules, registries and the effect queue.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 
 use crate::{
     command::CommandRegistry,
@@ -8,7 +8,8 @@ use crate::{
     event::{Effect, Event},
     key::Key,
     keymap::{Keymap, Mode},
-    module::{Module, RegisterError, RegisterErrorKind, Registrar},
+    module::{Module, ModuleFailure, RegisterError, RegisterErrorKind, Registrar},
+    panic::run_guarded,
     state::EditorState,
 };
 
@@ -20,9 +21,17 @@ const MAX_EFFECTS: usize = 10_000;
 ///
 /// Input is handled run-to-completion: a key runs its command, then every queued command and
 /// event, before the next key is handled.
+///
+/// Module code (registration, command handlers, event handlers) runs guarded: a module that
+/// panics is disabled — its commands and event handler are not called again — and recorded in
+/// [`failures`](Self::failures); the editor keeps running.
 pub struct Editor {
     state: EditorState,
     modules: Vec<Box<dyn Module>>,
+    /// Ids of modules that panicked; their code is skipped.
+    disabled_modules: HashSet<&'static str>,
+    /// Why each disabled module was disabled, in order.
+    failures: Vec<ModuleFailure>,
     commands: CommandRegistry,
     keymap: Keymap,
     effects: VecDeque<Effect>,
@@ -34,8 +43,8 @@ impl Editor {
     ///
     /// # Errors
     /// Every problem found, each tagged with the module it comes from: duplicate commands
-    /// or keys, invalid key notation, keys bound to commands nobody registered and a missing
-    /// `editor.quit` (see [`RegisterErrorKind`]).
+    /// or keys, invalid key notation, keys bound to commands nobody registered, a missing
+    /// `editor.quit` and modules that panicked while registering (see [`RegisterErrorKind`]).
     pub fn new(
         state: EditorState,
         mut modules: Vec<Box<dyn Module>>,
@@ -44,12 +53,19 @@ impl Editor {
         let mut keymap = Keymap::default();
         let mut errors: Vec<RegisterError> = Vec::new();
         modules.iter_mut().for_each(|m| {
-            m.register(&mut Registrar::new(
-                m.id(),
-                &mut commands,
-                &mut keymap,
-                &mut errors,
-            ))
+            if let Err(message) = run_guarded(|| {
+                m.register(&mut Registrar::new(
+                    m.id(),
+                    &mut commands,
+                    &mut keymap,
+                    &mut errors,
+                ))
+            }) {
+                errors.push(RegisterError {
+                    module: m.id(),
+                    kind: RegisterErrorKind::ModulePanicked { message },
+                });
+            }
         });
 
         // Checked after all modules registered: a key may point to a command of a module
@@ -90,6 +106,8 @@ impl Editor {
         let mut editor = Self {
             state,
             modules,
+            disabled_modules: HashSet::new(),
+            failures: Vec::new(),
             commands,
             keymap,
             effects,
@@ -110,7 +128,8 @@ impl Editor {
 
     /// Runs the command bound to `key` in the current mode, then everything it queued.
     ///
-    /// Returns `false` if the key is not bound (nothing happens).
+    /// Returns `false` if the key is not bound (nothing happens). A key bound to a command of
+    /// a disabled module returns `true` and does nothing.
     pub fn handle_key(&mut self, key: Key) -> bool {
         if let Some(bind) = self.keymap.lookup(self.mode, key) {
             self.effects
@@ -123,30 +142,69 @@ impl Editor {
     }
 
     /// Runs queued effects until the queue is empty or [`MAX_EFFECTS`] is reached.
+    /// Isolates module functions so panic doesn't break editor loop. Disables modules that panic.
     fn drain(&mut self) {
         let mut iteration: usize = 0;
         while let Some(effect) = self.effects.pop_front() {
             iteration += 1;
             if iteration > MAX_EFFECTS {
-                self.effects = VecDeque::new();
+                self.effects.clear();
                 break;
             }
 
             let mut ctx = Ctx::new(&mut self.state, &mut self.effects);
             match effect {
                 Effect::Exec(name) => {
-                    if let Some(cmd) = self.commands.get(&name) {
-                        (cmd.handler)(&mut ctx);
+                    let Some(cmd) = self.commands.get(&name) else {
+                        continue;
+                    };
+                    if self.disabled_modules.contains(cmd.module) {
+                        continue;
+                    }
+                    if let Err(message) = run_guarded(|| (cmd.handler)(&mut ctx)) {
+                        record_failure(
+                            &mut self.disabled_modules,
+                            &mut self.failures,
+                            cmd.module,
+                            message,
+                        );
                     }
                 }
                 Effect::Emit(event) => {
-                    self.modules
-                        .iter_mut()
-                        .for_each(|m| m.on_event(&event, &mut ctx));
+                    for module in &mut self.modules {
+                        let id = module.id();
+                        if self.disabled_modules.contains(id) {
+                            continue;
+                        }
+                        if let Err(message) = run_guarded(|| module.on_event(&event, &mut ctx)) {
+                            record_failure(
+                                &mut self.disabled_modules,
+                                &mut self.failures,
+                                id,
+                                message,
+                            );
+                        }
+                    }
                 }
             }
         }
     }
+
+    /// Modules that panicked and were disabled, in the order it happened.
+    pub fn failures(&self) -> &[ModuleFailure] {
+        &self.failures
+    }
+}
+
+/// Disables `module` and remembers why.
+fn record_failure(
+    disabled: &mut HashSet<&'static str>,
+    failures: &mut Vec<ModuleFailure>,
+    module: &'static str,
+    message: String,
+) {
+    disabled.insert(module);
+    failures.push(ModuleFailure { module, message });
 }
 
 #[cfg(test)]
@@ -360,5 +418,148 @@ mod tests {
         let (mut editor, _) = editor_with_probe("a\n");
         editor.handle_key(Key::Ctrl('q'));
         assert!(editor.state().should_quit());
+    }
+
+    // ----- panic isolation -----
+
+    /// Counts how often its code runs; its command always panics, `on_event` optionally.
+    struct Boom {
+        handler_calls: Rc<Cell<usize>>,
+        event_calls: Rc<Cell<usize>>,
+        panic_in_event: bool,
+    }
+
+    impl Module for Boom {
+        fn id(&self) -> &'static str {
+            "boom"
+        }
+        fn register(&mut self, r: &mut Registrar) {
+            let calls = self.handler_calls.clone();
+            r.command("boom.now", "", move |_| {
+                calls.set(calls.get() + 1);
+                panic!("handler failed");
+            });
+            r.keymap(Mode::Normal, "b", "boom.now");
+        }
+        fn on_event(&mut self, _event: &Event, _cx: &mut Ctx) {
+            self.event_calls.set(self.event_calls.get() + 1);
+            if self.panic_in_event {
+                panic!("event failed");
+            }
+        }
+    }
+
+    struct BoomCounters {
+        handler_calls: Rc<Cell<usize>>,
+        event_calls: Rc<Cell<usize>>,
+    }
+
+    /// `Boom` first, then `Probe` (which provides `editor.quit` and `j`).
+    fn editor_with_boom(panic_in_event: bool) -> (Editor, BoomCounters, Counters) {
+        let boom = BoomCounters {
+            handler_calls: Rc::new(Cell::new(0)),
+            event_calls: Rc::new(Cell::new(0)),
+        };
+        let probe = Counters {
+            moved: Rc::new(Cell::new(0)),
+            opened: Rc::new(Cell::new(0)),
+        };
+        let modules: Vec<Box<dyn Module>> = vec![
+            Box::new(Boom {
+                handler_calls: boom.handler_calls.clone(),
+                event_calls: boom.event_calls.clone(),
+                panic_in_event,
+            }),
+            Box::new(Probe {
+                moved: probe.moved.clone(),
+                opened: probe.opened.clone(),
+            }),
+        ];
+        let state = EditorState::with_document(Document::from_text(None, "a\nb\n"));
+        (Editor::new(state, modules).unwrap(), boom, probe)
+    }
+
+    fn failure(module: &'static str, message: &str) -> ModuleFailure {
+        ModuleFailure {
+            module,
+            message: message.into(),
+        }
+    }
+
+    #[test]
+    fn panic_in_register_is_a_registration_error() {
+        let errors = register(vec![
+            Box::new(TestModule("editor", quit)),
+            Box::new(TestModule("boom", |_| panic!("register failed"))),
+            Box::new(TestModule("bad", |r| {
+                r.keymap(Mode::Normal, "<Foo>", "editor.quit")
+            })),
+        ]);
+        assert_eq!(errors.len(), 2, "{errors:?}");
+        assert_eq!(
+            errors[0],
+            RegisterError {
+                module: "boom",
+                kind: RegisterErrorKind::ModulePanicked {
+                    message: "register failed".into()
+                },
+            }
+        );
+        // registration goes on after a panic: the next module's error is reported too
+        assert_eq!(errors[1].module, "bad");
+    }
+
+    #[test]
+    fn panicking_handler_disables_its_module() {
+        let (mut editor, boom, _) = editor_with_boom(false);
+        assert!(editor.handle_key(Key::Char('b')));
+        assert_eq!(boom.handler_calls.get(), 1);
+        assert_eq!(editor.failures, [failure("boom", "handler failed")]);
+        assert!(editor.disabled_modules.contains("boom"));
+    }
+
+    #[test]
+    fn editor_keeps_working_after_a_module_panics() {
+        let (mut editor, _, probe) = editor_with_boom(false);
+        editor.handle_key(Key::Char('b'));
+        assert!(editor.handle_key(Key::Char('j'))); // Probe's command still runs
+        assert_eq!(editor.state().focused_window().cursor(), 2);
+        assert_eq!(probe.moved.get(), 1);
+        editor.handle_key(Key::Ctrl('q'));
+        assert!(editor.state().should_quit());
+    }
+
+    #[test]
+    fn disabled_module_command_is_not_called_again() {
+        let (mut editor, boom, _) = editor_with_boom(false);
+        editor.handle_key(Key::Char('b'));
+        assert!(editor.handle_key(Key::Char('b'))); // still bound, but skipped
+        assert_eq!(boom.handler_calls.get(), 1);
+        assert_eq!(editor.failures.len(), 1);
+    }
+
+    #[test]
+    fn disabled_module_gets_no_more_events() {
+        let (mut editor, boom, probe) = editor_with_boom(false);
+        assert_eq!(boom.event_calls.get(), 1); // DocumentOpened at startup
+        editor.handle_key(Key::Char('b')); // panics in the handler → disabled
+        editor.handle_key(Key::Char('j')); // CursorMoved
+        assert_eq!(boom.event_calls.get(), 1);
+        assert_eq!(probe.moved.get(), 1);
+    }
+
+    #[test]
+    fn panicking_event_handler_disables_module_and_others_still_get_the_event() {
+        // Boom panics on DocumentOpened while the editor starts
+        let (mut editor, boom, probe) = editor_with_boom(true);
+        assert_eq!(editor.failures, [failure("boom", "event failed")]);
+        assert_eq!(probe.opened.get(), 1); // Probe comes after Boom and still got it
+
+        editor.handle_key(Key::Char('j'));
+        assert_eq!(boom.event_calls.get(), 1); // no more events for Boom
+        assert_eq!(probe.moved.get(), 1);
+
+        editor.handle_key(Key::Char('b'));
+        assert_eq!(boom.handler_calls.get(), 0); // nor its commands
     }
 }
