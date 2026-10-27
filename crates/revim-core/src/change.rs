@@ -26,7 +26,7 @@
 //! assert_eq!(text.to_string(), "hello Revim");
 //! ```
 
-use std::cmp::Ordering;
+use std::{cmp::Ordering, ops::Range};
 
 use ropey::Rope;
 
@@ -122,6 +122,34 @@ impl ChangeSet {
     pub fn insert(&mut self, s: &str) {
         self.len_after += s.chars().count();
         Op::Insert(s.to_string()).push_into(&mut self.ops);
+    }
+
+    /// Replaces chars `range` of a text of `len` chars with `text`: a change set for the whole
+    /// text that keeps everything outside of `range`. An empty `range` only inserts, an empty
+    /// `text` only deletes.
+    ///
+    /// ```
+    /// use revim_core::change::ChangeSet;
+    /// use ropey::Rope;
+    ///
+    /// let mut text = Rope::from_str("hello world");
+    /// ChangeSet::replace(11, 6..11, "Revim").apply(&mut text);
+    /// assert_eq!(text.to_string(), "hello Revim");
+    /// ```
+    ///
+    /// # Panics
+    /// If `range.start > range.end` or `range.end > len`.
+    pub fn replace(len: usize, range: Range<usize>, text: &str) -> Self {
+        assert!(
+            range.start <= range.end && range.end <= len,
+            "replace: range {range:?} out of 0..{len}"
+        );
+        let mut cs = Self::new();
+        cs.retain(range.start); // keep everything before
+        cs.delete(range.end - range.start); // remove the range
+        cs.insert(text); // write the new text
+        cs.retain(len - range.end); // keep the rest
+        cs
     }
 
     /// Length (in chars) of the text this change set applies to.
@@ -433,6 +461,40 @@ mod tests {
     fn replace_world() -> ChangeSet {
         // "hello world" → "hello Revim"
         ChangeSet::from_ops(vec![Retain(6), Delete(5), Insert("Revim".into())])
+    }
+
+    #[test]
+    fn replace_covers_the_whole_text() {
+        let cs = ChangeSet::replace(11, 6..11, "Revim");
+        assert_eq!(cs, replace_world());
+        assert_eq!((cs.len_before(), cs.len_after()), (11, 11));
+    }
+
+    #[test]
+    fn replace_with_empty_range_inserts() {
+        let mut text = Rope::from_str("ab");
+        ChangeSet::replace(2, 1..1, "ż").apply(&mut text);
+        assert_eq!(text.to_string(), "ażb");
+    }
+
+    #[test]
+    fn replace_with_empty_text_deletes() {
+        let mut text = Rope::from_str("abc");
+        ChangeSet::replace(3, 0..2, "").apply(&mut text);
+        assert_eq!(text.to_string(), "c");
+    }
+
+    #[test]
+    fn replace_at_the_end() {
+        let mut text = Rope::from_str("ab");
+        ChangeSet::replace(2, 2..2, "c").apply(&mut text);
+        assert_eq!(text.to_string(), "abc");
+    }
+
+    #[test]
+    #[should_panic(expected = "out of")]
+    fn replace_panics_on_range_past_the_end() {
+        ChangeSet::replace(2, 1..3, "");
     }
 
     #[test]

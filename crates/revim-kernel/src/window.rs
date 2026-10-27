@@ -1,7 +1,8 @@
 //! Windows: views of documents.
 
 use revim_core::{
-    movement::{Motion, column, down, left, right, up},
+    change::ChangeSet,
+    movement::{Motion, clamp_cursor, column, down, left, right, up},
     selection::Selection,
 };
 use ropey::Rope;
@@ -60,6 +61,21 @@ impl Window {
         self.selection = Selection::point(pos);
         self.desired_col = desired_col;
     }
+
+    /// Replaces the selection, e.g. with the one a transaction asked for. Resets the sticky
+    /// column and scrolls so that the cursor stays visible.
+    pub(crate) fn set_selection(&mut self, text: &Rope, selection: Selection) {
+        self.selection = selection;
+        self.desired_col = None;
+        self.scroll_to_line(text.char_to_line(self.cursor()));
+    }
+
+    /// Moves the selection through `changes`, so that it stays on the same text after an edit.
+    pub(crate) fn map_selection(&mut self, text: &Rope, changes: &ChangeSet) {
+        self.selection.map(changes);
+        self.scroll_to_line(text.char_to_line(self.cursor()));
+    }
+
     /// Sets the number of visible lines, used to keep the cursor in view when it moves.
     pub fn set_height(&mut self, height: usize) {
         self.height = height;
@@ -98,6 +114,16 @@ impl Window {
         } else if cursor_line >= self.scroll + self.height {
             self.scroll = cursor_line + 1 - self.height;
         }
+    }
+
+    /// Moves the cursor to the nearest valid position in `text` ([`clamp_cursor`]); with
+    /// `past_end` it may stand after the last char of a line (Insert). Keeps the sticky column.
+    /// Collapses the selection to a single cursor.
+    pub(crate) fn clamp_cursor(&mut self, text: &Rope, past_end: bool) {
+        self.set_cursor(
+            clamp_cursor(text, self.cursor(), past_end),
+            self.desired_col,
+        );
     }
 }
 
@@ -223,5 +249,37 @@ mod tests {
             w.move_cursor(&text, Motion::Down);
         }
         assert_eq!(w.scroll(), 0);
+    }
+
+    #[test]
+    fn set_selection_resets_the_sticky_column_and_scrolls() {
+        let text = Rope::from_str(&"line\n".repeat(50));
+        let mut w = win();
+        w.set_height(10);
+        w.move_cursor(&text, Motion::Down); // sticky column set
+        w.set_selection(&text, Selection::point(5 * 30)); // line 30
+        assert_eq!((w.cursor(), w.desired_col, w.scroll()), (150, None, 21));
+    }
+
+    #[test]
+    fn map_selection_follows_the_text() {
+        let mut text = Rope::from_str("ab\n");
+        let mut w = win();
+        w.move_cursor(&text, Motion::Right); // 'b'
+        let changes = ChangeSet::replace(3, 0..0, "xy");
+        changes.apply(&mut text);
+        w.map_selection(&text, &changes);
+        assert_eq!(w.cursor(), 3); // still 'b'
+    }
+
+    #[test]
+    fn clamp_cursor_depends_on_past_end() {
+        let text = Rope::from_str("ab\n");
+        let mut w = win();
+        w.set_selection(&text, Selection::point(2)); // after 'b'
+        w.clamp_cursor(&text, true);
+        assert_eq!(w.cursor(), 2);
+        w.clamp_cursor(&text, false);
+        assert_eq!(w.cursor(), 1);
     }
 }

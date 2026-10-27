@@ -1,10 +1,13 @@
 //! Vim motions and commands.
 
-use revim_api::{Mode, Module, Motion, Registrar};
+use revim_api::{Ctx, Mode, Module, Motion, Registrar};
 
-/// Vim-style editing: `h` `j` `k` `l` and the arrow keys move the cursor.
+/// Vim-style editing: `h` `j` `k` `l` and the arrow keys move the cursor (arrows also in
+/// Insert), `i` enters Insert, `<Esc>` goes back to Normal.
 ///
-/// Commands: `vim.move.left`, `vim.move.right`, `vim.move.up`, `vim.move.down`.
+/// Commands: `vim.move.left`, `vim.move.right`, `vim.move.up`, `vim.move.down`,
+/// `vim.mode.insert`, `vim.mode.normal`. Typing and deleting text in Insert is done by the
+/// `editor.*` commands of `mod-builtin`.
 pub struct Vim;
 
 impl Module for Vim {
@@ -12,33 +15,53 @@ impl Module for Vim {
         "vim"
     }
     fn register(&mut self, r: &mut Registrar) {
-        r.command("vim.move.left", "Move cursor left", |cx| {
+        r.command("vim.move.left", "Move cursor left", |cx, _| {
             cx.move_cursor(Motion::Left)
         });
-        r.command("vim.move.right", "Move cursor right", |cx| {
+        r.command("vim.move.right", "Move cursor right", |cx, _| {
             cx.move_cursor(Motion::Right)
         });
-        r.command("vim.move.up", "Move cursor up", |cx| {
+        r.command("vim.move.up", "Move cursor up", |cx, _| {
             cx.move_cursor(Motion::Up)
         });
-        r.command("vim.move.down", "Move cursor down", |cx| {
+        r.command("vim.move.down", "Move cursor down", |cx, _| {
             cx.move_cursor(Motion::Down)
         });
 
-        r.command("vim.panic", "Move cursor down", |_cx| {
-            panic!("panic");
+        r.command("vim.mode.insert", "Insert before the cursor", |cx, _| {
+            cx.set_mode(Mode::Insert)
         });
-        r.keymap(Mode::Normal, "p", "vim.panic");
+        r.command("vim.mode.normal", "Back to Normal mode", Vim::normal);
 
-        r.keymap(Mode::Normal, "h", "vim.move.left");
-        r.keymap(Mode::Normal, "l", "vim.move.right");
-        r.keymap(Mode::Normal, "k", "vim.move.up");
-        r.keymap(Mode::Normal, "j", "vim.move.down");
+        r.keymap(Mode::Normal, "h", "vim.move.left", "");
+        r.keymap(Mode::Normal, "l", "vim.move.right", "");
+        r.keymap(Mode::Normal, "k", "vim.move.up", "");
+        r.keymap(Mode::Normal, "j", "vim.move.down", "");
 
-        r.keymap(Mode::Normal, "<Left>", "vim.move.left");
-        r.keymap(Mode::Normal, "<Right>", "vim.move.right");
-        r.keymap(Mode::Normal, "<Up>", "vim.move.up");
-        r.keymap(Mode::Normal, "<Down>", "vim.move.down");
+        r.keymap(Mode::Normal, "<Left>", "vim.move.left", "");
+        r.keymap(Mode::Normal, "<Right>", "vim.move.right", "");
+        r.keymap(Mode::Normal, "<Up>", "vim.move.up", "");
+        r.keymap(Mode::Normal, "<Down>", "vim.move.down", "");
+
+        r.keymap(Mode::Insert, "<Left>", "vim.move.left", "");
+        r.keymap(Mode::Insert, "<Right>", "vim.move.right", "");
+        r.keymap(Mode::Insert, "<Up>", "vim.move.up", "");
+        r.keymap(Mode::Insert, "<Down>", "vim.move.down", "");
+
+        r.keymap(Mode::Normal, "i", "vim.mode.insert", "");
+        r.keymap(Mode::Insert, "<Esc>", "vim.mode.normal", "");
+    }
+}
+
+impl Vim {
+    /// `<Esc>`: like in Vim the cursor goes one char left (not past the line start), so that
+    /// it stands on the last typed char.
+    fn normal(cx: &mut Ctx, _args: &str) {
+        if cx.state().mode() == Mode::Insert {
+            // still in Insert: the cursor may be after the last char, `Left` puts it on it
+            cx.move_cursor(Motion::Left);
+        }
+        cx.set_mode(Mode::Normal);
     }
 }
 
@@ -84,5 +107,53 @@ mod tests {
         press(&mut ed, "j");
         press(&mut ed, "j");
         assert_eq!(cursor(&ed), 14);
+    }
+
+    #[test]
+    fn i_enters_insert_and_esc_leaves_it() {
+        let mut ed = editor("ab\n", vec![Box::new(Vim)]);
+        assert!(press(&mut ed, "i"));
+        assert_eq!(ed.state().mode(), Mode::Insert);
+        assert!(press(&mut ed, "<Esc>"));
+        assert_eq!(ed.state().mode(), Mode::Normal);
+    }
+
+    #[test]
+    fn esc_moves_the_cursor_one_char_left() {
+        let mut ed = editor("abc\n", vec![Box::new(Vim)]);
+        press(&mut ed, "l");
+        press(&mut ed, "l"); // on 'c'
+        press(&mut ed, "i");
+        press(&mut ed, "<Esc>");
+        assert_eq!(cursor(&ed), 1); // on 'b'
+    }
+
+    #[test]
+    fn esc_at_the_line_start_stays() {
+        // a0 \n1 | b2
+        let mut ed = editor("a\nb\n", vec![Box::new(Vim)]);
+        press(&mut ed, "j");
+        press(&mut ed, "i");
+        press(&mut ed, "<Esc>");
+        assert_eq!(cursor(&ed), 2);
+    }
+
+    #[test]
+    fn arrows_move_in_insert() {
+        let mut ed = editor("ab\ncd\n", vec![Box::new(Vim)]);
+        press(&mut ed, "i");
+        for (key, expected) in [("<Right>", 1), ("<Down>", 4), ("<Left>", 3), ("<Up>", 0)] {
+            assert!(press(&mut ed, key), "{key}");
+            assert_eq!(cursor(&ed), expected, "{key}");
+        }
+        assert_eq!(ed.state().mode(), Mode::Insert);
+    }
+
+    #[test]
+    fn hjkl_do_not_move_in_insert() {
+        let mut ed = editor("ab\ncd\n", vec![Box::new(Vim)]);
+        press(&mut ed, "i");
+        assert!(!press(&mut ed, "l")); // typed text, handled by mod-builtin's fallback
+        assert_eq!(cursor(&ed), 0);
     }
 }

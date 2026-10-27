@@ -165,6 +165,31 @@ pub fn column(text: &Rope, pos: usize) -> usize {
     pos - text.line_to_char(line_idx)
 }
 
+/// Nearest valid cursor position to `pos`, on the same line when possible.
+///
+/// With `past_end` (Insert) the cursor may stand after the last char of a line; without it
+/// (Normal) it stands on a char, except on an empty line. Never on the line ending (`\n` or
+/// `\r\n`) and never on the line after a trailing line ending, which is not a line (see
+/// [`line_count`]). A `pos` past the end of the text is treated as the end of the text.
+///
+/// ```
+/// use revim_core::movement::clamp_cursor;
+/// use ropey::Rope;
+///
+/// let text = Rope::from_str("abc\n");
+/// assert_eq!(clamp_cursor(&text, 3, false), 2); // Normal: from '\n' onto 'c'
+/// assert_eq!(clamp_cursor(&text, 3, true), 3); // Insert: after 'c' is fine
+/// assert_eq!(clamp_cursor(&text, 4, true), 3); // not on the line after the trailing '\n'
+/// ```
+pub fn clamp_cursor(text: &Rope, pos: usize, past_end: bool) -> usize {
+    let pos = pos.min(text.len_chars());
+    let line = text.char_to_line(pos).min(line_count(text) - 1);
+    let start = text.line_to_char(line);
+    let len = line_content_len(text.line(line));
+    let max = if past_end { len } else { len.saturating_sub(1) };
+    start + (pos - start).min(max)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -321,5 +346,62 @@ mod tests {
             (left(&t, 0), right(&t, 0), up(&t, 0, 0), down(&t, 0, 0)),
             (0, 0, 0, 0)
         );
+    }
+
+    #[test]
+    fn clamp_keeps_valid_positions() {
+        // a0 b1 c2 \n3 | d4 e5 \n6 | \n7 | f8 g9 h10 i11 j12
+        for pos in [0, 2, 4, 5, 7, 8, 12] {
+            assert_eq!(clamp_cursor(&text(), pos, false), pos, "{pos}");
+            assert_eq!(clamp_cursor(&text(), pos, true), pos, "{pos}");
+        }
+    }
+
+    #[test]
+    fn clamp_moves_off_the_line_ending_in_normal() {
+        assert_eq!(clamp_cursor(&text(), 3, false), 2);
+        assert_eq!(clamp_cursor(&text(), 6, false), 5);
+    }
+
+    #[test]
+    fn clamp_allows_after_the_last_char_in_insert() {
+        assert_eq!(clamp_cursor(&text(), 3, true), 3);
+        assert_eq!(clamp_cursor(&text(), 6, true), 6);
+        assert_eq!(clamp_cursor(&text(), 13, true), 13); // end of text without '\n'
+    }
+
+    #[test]
+    fn clamp_past_the_end_of_text() {
+        assert_eq!(clamp_cursor(&text(), 100, false), 12);
+        assert_eq!(clamp_cursor(&text(), 100, true), 13);
+    }
+
+    #[test]
+    fn clamp_on_empty_line_stays() {
+        assert_eq!(clamp_cursor(&text(), 7, false), 7);
+        assert_eq!(clamp_cursor(&text(), 7, true), 7);
+    }
+
+    #[test]
+    fn clamp_never_on_the_line_after_trailing_newline() {
+        let text = Rope::from_str("ab\n");
+        assert_eq!(clamp_cursor(&text, 3, false), 1);
+        assert_eq!(clamp_cursor(&text, 3, true), 2);
+    }
+
+    #[test]
+    fn clamp_skips_carriage_return() {
+        // a0 b1 \r2 \n3
+        let text = Rope::from_str("ab\r\n");
+        assert_eq!(clamp_cursor(&text, 2, false), 1);
+        assert_eq!(clamp_cursor(&text, 3, false), 1);
+        assert_eq!(clamp_cursor(&text, 3, true), 2);
+    }
+
+    #[test]
+    fn clamp_in_empty_text() {
+        let text = Rope::new();
+        assert_eq!(clamp_cursor(&text, 0, false), 0);
+        assert_eq!(clamp_cursor(&text, 5, true), 0);
     }
 }

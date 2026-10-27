@@ -10,8 +10,9 @@
 //! Everything else like LSP, git integration, vim motions, net buffers etc. will be provided by specialized modules.
 //! Module is a self contained piece of functionality that has access to editor state with [`Ctx`] (e.g. focused buffer content)
 //! and can use that to interact with the editor.
-//! Modules can: provide commands (functions using [`Ctx`]) and keybinds that trigger those functions,
+//! Modules can: provide commands (functions using [`Ctx`] and an argument) and keybinds that trigger those functions,
 //! execute other modules' commands, add gutter columns next to the text ([`GutterProvider`]),
+//! change the text by applying a [`Transaction`] with [`Ctx::apply`],
 //! and optionally react to [`Event`]s such as an opened document or a moved cursor.
 //!
 //! Modules are listed in `src/conf.rs` of the editor; removing a line disables a module.
@@ -28,6 +29,11 @@
 //! # Conventions
 //!
 //! - **Command names** are `module.object.action`, e.g. `vim.move.down`, and must be unique.
+//! - **Command arguments** are one raw string, parsed by the handler; `""` means none. They
+//!   come from the key binding (`r.keymap(Mode::Insert, "<CR>", "editor.insert", "\n")`), from
+//!   [`Ctx::exec`] or, for chars typed without a binding, from the mode's fallback
+//!   ([`Registrar::keymap_fallback`]). On an argument it does not accept, a handler should do
+//!   nothing instead of panicking.
 //! - **Keys** are written in Vim notation: `"j"`, `"J"`, `"<C-q>"`, `"<Up>"`, `"<CR>"`,
 //!   `"<Esc>"`. Sequences (`"gg"`) are not supported yet.
 //! - Registration problems (duplicate commands or keys, invalid key notation, keys bound to
@@ -54,11 +60,11 @@
 //!     }
 //!
 //!     fn register(&mut self, r: &mut Registrar) {
-//!         r.command("jump.down2", "Move cursor two lines down", |cx| {
+//!         r.command("jump.down2", "Move cursor two lines down", |cx, _args| {
 //!             cx.move_cursor(Motion::Down);
 //!             cx.move_cursor(Motion::Down);
 //!         });
-//!         r.keymap(Mode::Normal, "J", "jump.down2");
+//!         r.keymap(Mode::Normal, "J", "jump.down2", "");
 //!     }
 //! }
 //!
@@ -94,7 +100,12 @@
 //! }
 //! ```
 
-pub use revim_core::movement::Motion;
+pub use revim_core::{
+    change::{Assoc, ChangeSet, Op},
+    movement::Motion,
+    selection::{Range, Selection},
+    transaction::Transaction,
+};
 pub use revim_kernel::{
     ctx::Ctx,
     document::{Document, Uri},
@@ -122,7 +133,9 @@ pub mod testing {
             "test"
         }
         fn register(&mut self, r: &mut Registrar) {
-            r.command("editor.quit", "Quit the editor (test stub)", |cx| cx.quit());
+            r.command("editor.quit", "Quit the editor (test stub)", |cx, _| {
+                cx.quit()
+            });
         }
     }
 

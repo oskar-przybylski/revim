@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use crate::ctx::Ctx;
 
 /// The function run when a command is executed.
-pub type CommandFn = Box<dyn Fn(&mut Ctx)>;
+pub type CommandFn = Box<dyn Fn(&mut Ctx, &str)>;
 
 /// A named action that keys, other commands and modules can run.
 pub struct Command {
@@ -52,7 +52,7 @@ mod tests {
             name: name.into(),
             desc: desc.into(),
             module: "test",
-            handler: Box::new(|_| {}),
+            handler: Box::new(|_, _| {}),
         }
     }
 

@@ -2,13 +2,17 @@
 
 use std::{io, path::PathBuf};
 
-use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::{
+    cursor::SetCursorStyle,
+    event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
+};
 use futures::StreamExt;
 use ratatui::DefaultTerminal;
 use revim_kernel::{
     document::{Document, Uri},
     editor::Editor,
     key::Key,
+    keymap::Mode,
     module::Module,
     panic::in_guarded_mode,
     state::EditorState,
@@ -54,6 +58,9 @@ pub async fn run(path: Option<PathBuf>, modules: Vec<Box<dyn Module>>) -> io::Re
         }
     }));
     let result = event_loop(&mut terminal, &mut editor).await;
+    // Give the shell back its own cursor shape. Ignoring a failure here is deliberate: it must
+    // not hide the result of the event loop, and the terminal is restored next anyway.
+    let _ = crossterm::execute!(io::stdout(), SetCursorStyle::DefaultUserShape);
     ratatui::restore();
     result
 }
@@ -62,6 +69,7 @@ pub async fn run(path: Option<PathBuf>, modules: Vec<Box<dyn Module>>) -> io::Re
 async fn event_loop(terminal: &mut DefaultTerminal, editor: &mut Editor) -> io::Result<()> {
     let mut events = EventStream::new();
     let mut logged = 0; // module failures already logged
+    let mut shown_mode: Option<Mode> = None;
     loop {
         terminal.draw(|f| {
             let area = f.area();
@@ -75,6 +83,11 @@ async fn event_loop(terminal: &mut DefaultTerminal, editor: &mut Editor) -> io::
                 f.set_cursor_position(pos);
             }
         })?;
+        let mode = editor.state().mode();
+        if shown_mode != Some(mode) {
+            crossterm::execute!(terminal.backend_mut(), cursor_style(mode))?;
+            shown_mode = Some(mode);
+        }
         // gutter providers run while drawing and may disable their module
         log_new_failures(editor, &mut logged);
 
@@ -90,6 +103,15 @@ async fn event_loop(terminal: &mut DefaultTerminal, editor: &mut Editor) -> io::
                 None => return Ok(()),
             }
         }
+    }
+}
+
+/// Terminal cursor shape for `mode`: a bar in Insert (the cursor is between chars), a block
+/// otherwise (it stands on a char).
+fn cursor_style(mode: Mode) -> SetCursorStyle {
+    match mode {
+        Mode::Insert => SetCursorStyle::SteadyBar,
+        _ => SetCursorStyle::SteadyBlock,
     }
 }
 
@@ -167,7 +189,7 @@ fn to_key(event: &KeyEvent) -> Option<Key> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use revim_kernel::{keymap::Mode, module::Registrar};
+    use revim_kernel::module::Registrar;
 
     fn press(code: KeyCode, modifiers: KeyModifiers) -> Option<Key> {
         to_key(&KeyEvent::new(code, modifiers))
@@ -227,9 +249,9 @@ mod tests {
             "boom"
         }
         fn register(&mut self, r: &mut Registrar) {
-            r.command("editor.quit", "Quit the editor", |cx| cx.quit());
-            r.command("boom.now", "Panic", |_| panic!("boom"));
-            r.keymap(Mode::Normal, "b", "boom.now");
+            r.command("editor.quit", "Quit the editor", |cx, _| cx.quit());
+            r.command("boom.now", "Panic", |_, _| panic!("boom"));
+            r.keymap(Mode::Normal, "b", "boom.now", "");
         }
     }
 
@@ -248,5 +270,17 @@ mod tests {
 
         log_new_failures(&editor, &mut logged); // nothing new since the last call
         assert_eq!(logged, 1);
+    }
+
+    #[test]
+    fn cursor_is_a_bar_only_in_insert() {
+        assert!(matches!(
+            cursor_style(Mode::Insert),
+            SetCursorStyle::SteadyBar
+        ));
+        assert!(matches!(
+            cursor_style(Mode::Normal),
+            SetCursorStyle::SteadyBlock
+        ));
     }
 }

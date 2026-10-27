@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use revim_core::movement::line_count;
+use revim_core::{change::ChangeSet, movement::line_count};
 use ropey::Rope;
 
 /// Address of a document: where its text comes from and where it is saved.
@@ -89,6 +89,15 @@ impl Document {
     pub fn line_count(&self) -> usize {
         line_count(&self.text)
     }
+
+    /// Applies `change_set` to the text and increases the version by one.
+    ///
+    /// # Panics
+    /// If `change_set` does not fit the text ([`ChangeSet::apply`]).
+    pub(crate) fn apply(&mut self, change_set: &ChangeSet) {
+        change_set.apply(&mut self.text);
+        self.version += 1;
+    }
 }
 
 #[cfg(test)]
@@ -115,5 +124,14 @@ mod tests {
         let doc = Document::scratch();
         assert_eq!(doc.text().len_chars(), 0);
         assert!(doc.uri().is_none());
+    }
+
+    #[test]
+    fn apply_changes_the_text_and_bumps_the_version() {
+        let mut doc = Document::from_text(None, "ab\n");
+        doc.apply(&ChangeSet::replace(3, 1..1, "X"));
+        doc.apply(&ChangeSet::replace(4, 0..1, ""));
+        assert_eq!(doc.text().to_string(), "Xb\n");
+        assert_eq!(doc.version(), 2);
     }
 }
