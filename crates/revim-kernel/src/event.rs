@@ -1,5 +1,7 @@
 //! Events sent to modules and the deferred work queued by handlers.
 
+use std::collections::VecDeque;
+
 use crate::{state::DocId, window::WindowId};
 
 /// Something that happened in the editor, delivered to every module's
@@ -14,15 +16,53 @@ use crate::{state::DocId, window::WindowId};
 #[non_exhaustive]
 pub enum Event {
     /// A document was opened (also sent for the initial document at startup).
-    DocumentOpened { doc: DocId },
+    DocumentOpened {
+        /// The opened document.
+        doc: DocId,
+    },
     /// The cursor of a window moved to a different position.
-    CursorMoved { window: WindowId },
+    CursorMoved {
+        /// The window whose cursor moved.
+        window: WindowId,
+    },
 }
 
 /// Work deferred until the current handler returns.
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Effect {
     /// Run the command with this name.
     Exec(String),
     /// Deliver the event to all modules.
     Emit(Event),
+}
+
+/// Queues `event` for delivery to every module after the current handler returns.
+pub(crate) fn emit(effects: &mut VecDeque<Effect>, event: Event) {
+    log::debug!("queued event {event:?}");
+    effects.push_back(Effect::Emit(event));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{document::Document, state::EditorState};
+
+    #[test]
+    fn emit_queues_events_at_the_back_in_order() {
+        let state = EditorState::with_document(Document::scratch());
+        let (doc, window) = (state.focused_doc_id(), state.focused_window_id());
+        let mut effects = VecDeque::from([Effect::Exec("first".into())]);
+
+        emit(&mut effects, Event::DocumentOpened { doc });
+        emit(&mut effects, Event::CursorMoved { window });
+
+        assert_eq!(
+            effects,
+            [
+                Effect::Exec("first".into()),
+                Effect::Emit(Event::DocumentOpened { doc }),
+                Effect::Emit(Event::CursorMoved { window }),
+            ]
+        );
+    }
 }

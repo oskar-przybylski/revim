@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 use revim_core::movement::Motion;
 
 use crate::{
-    event::{Effect, Event},
+    event::{self, Effect, Event},
     state::EditorState,
 };
 
@@ -33,8 +33,7 @@ impl<'a> Ctx<'a> {
         let before = self.state.focused_window().cursor();
         self.state.move_cursor(motion);
         if self.state.focused_window().cursor() != before {
-            self.effects
-                .push_back(Effect::Emit(Event::CursorMoved { window }));
+            event::emit(self.effects, Event::CursorMoved { window });
         }
     }
     /// Runs the command `command` after the current handler returns. An unknown name is ignored.

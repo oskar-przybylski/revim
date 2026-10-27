@@ -5,7 +5,7 @@ use std::collections::{HashSet, VecDeque};
 use crate::{
     command::CommandRegistry,
     ctx::Ctx,
-    event::{Effect, Event},
+    event::{self, Effect, Event},
     gutter::{GutterColumn, GutterContext, GutterProviderRegistry},
     key::Key,
     keymap::{Keymap, Mode},
@@ -55,7 +55,9 @@ impl Editor {
         let mut keymap = Keymap::default();
         let mut gutters = GutterProviderRegistry::default();
         let mut errors: Vec<RegisterError> = Vec::new();
+        log::info!("Starting module registration");
         modules.iter_mut().for_each(|m| {
+            log::info!("Registering module [{}]", m.id());
             if let Err(message) = run_guarded(|| {
                 m.register(&mut Registrar::new(
                     m.id(),
@@ -103,9 +105,12 @@ impl Editor {
         }
 
         let mut effects: VecDeque<Effect> = VecDeque::new();
-        effects.push_back(Effect::Emit(Event::DocumentOpened {
-            doc: state.focused_doc_id(),
-        }));
+        event::emit(
+            &mut effects,
+            Event::DocumentOpened {
+                doc: state.focused_doc_id(),
+            },
+        );
 
         let mut editor = Self {
             state,
@@ -146,13 +151,20 @@ impl Editor {
         }
     }
 
-    /// Runs queued effects until the queue is empty or [`MAX_EFFECTS`] is reached.
+    /// Runs queued effects until the queue is empty or [`MAX_EFFECTS`] is reached; then the rest
+    /// of the queue is dropped with a warning.
     /// Isolates module functions so panic doesn't break editor loop. Disables modules that panic.
     fn drain(&mut self) {
         let mut iteration: usize = 0;
         while let Some(effect) = self.effects.pop_front() {
             iteration += 1;
             if iteration > MAX_EFFECTS {
+                // `effect` was taken from the queue but not run: dropped too
+                log::warn!(
+                    "more than {MAX_EFFECTS} effects for one input, dropping {} queued effects \
+                     (commands or modules may be triggering each other)",
+                    self.effects.len() + 1
+                );
                 self.effects.clear();
                 break;
             }

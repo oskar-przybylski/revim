@@ -25,3 +25,6 @@ revim-api = { path = "crates/revim-api" }
 mod-builtin = {path = "modules/mod-builtin"}
 mod-vim = {path = "modules/mod-vim"}
 mod-gutter = {path = "modules/mod-gutter"}
+tracing-subscriber = "0.3.23"
+chrono = "0.4.45"
+log = "0.4.34"

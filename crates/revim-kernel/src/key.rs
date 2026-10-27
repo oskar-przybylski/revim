@@ -13,13 +13,21 @@ pub enum Key {
     Char(char),
     /// A character pressed with Ctrl (`<C-q>`); letters are lowercase.
     Ctrl(char),
+    /// Arrow up (`<Up>`).
     Up,
+    /// Arrow down (`<Down>`).
     Down,
+    /// Arrow left (`<Left>`).
     Left,
+    /// Arrow right (`<Right>`).
     Right,
+    /// Escape (`<Esc>`).
     Esc,
+    /// Enter (`<CR>`; `<Enter>` and `<Return>` parse to it too).
     Enter,
+    /// Backspace (`<BS>`; `<Backspace>` parses to it too).
     Backspace,
+    /// Tab (`<Tab>`).
     Tab,
 }
 

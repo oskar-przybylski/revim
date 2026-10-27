@@ -19,42 +19,49 @@ use revim_ui::window_view::WindowView;
 ///
 /// Opens `path` (or an empty scratch buffer when `None`; a missing file opens as an empty
 /// document with that path) and registers the modules — both before taking over the
-/// terminal, so errors are printed normally. Then runs the event loop and restores the
-/// terminal afterwards, also when the loop fails.
+/// terminal, so a failure ends the editor before the UI starts. Then runs the event loop and
+/// restores the terminal afterwards, also when the loop fails.
 ///
-/// A panic in module code does not touch the terminal: the module is disabled and the editor
-/// keeps running; disabled modules are listed after the terminal is restored. Any other panic
-/// restores the terminal and ends the editor.
+/// A panic in module code does not touch the terminal: the panic and the disabling of the
+/// module are logged and the editor keeps running. Any other panic restores the terminal and
+/// ends the editor.
 ///
 /// # Errors
-/// If the file cannot be read (other than not existing), if module registration fails
-/// (the message lists every problem), or on a terminal I/O error.
+/// If the file cannot be read (other than not existing; the message names the file), if module
+/// registration fails (every problem is logged, the error only counts them), or on a terminal
+/// I/O error.
 pub async fn run(path: Option<PathBuf>, modules: Vec<Box<dyn Module>>) -> io::Result<()> {
     let doc = load(path).await?;
     let state = EditorState::with_document(doc);
     let mut editor = Editor::new(state, modules).map_err(|errors| {
-        let list: Vec<String> = errors.iter().map(ToString::to_string).collect();
-        io::Error::other(format!("module registration failed:\n{}", list.join("\n")))
+        errors.iter().for_each(|e| log::error!("{e}"));
+        io::Error::other(format!(
+            "module registration failed ({} errors)",
+            errors.len()
+        ))
     })?;
 
     let mut terminal = ratatui::init();
     // Wraps ratatui's hook (installed by `init`), which restores the terminal. Module panics
-    // are caught by the kernel, so the terminal must stay as it is for them.
+    // are caught by the kernel, so the terminal must stay as it is for them; they are only
+    // logged here, because only the hook knows where the panic happened.
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        if !in_guarded_mode() {
+        if in_guarded_mode() {
+            log::error!("module {info}");
+        } else {
             previous(info)
         }
     }));
     let result = event_loop(&mut terminal, &mut editor).await;
     ratatui::restore();
-    editor.failures().iter().for_each(|f| eprintln!("{f}"));
     result
 }
 
 /// Draws a frame, waits for the next event, handles it — until quit or a terminal error.
 async fn event_loop(terminal: &mut DefaultTerminal, editor: &mut Editor) -> io::Result<()> {
     let mut events = EventStream::new();
+    let mut logged = 0; // module failures already logged
     loop {
         terminal.draw(|f| {
             let area = f.area();
@@ -68,11 +75,14 @@ async fn event_loop(terminal: &mut DefaultTerminal, editor: &mut Editor) -> io::
                 f.set_cursor_position(pos);
             }
         })?;
+        // gutter providers run while drawing and may disable their module
+        log_new_failures(editor, &mut logged);
 
         tokio::select! {
             maybe_event = events.next() => match maybe_event {
                 Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
                    if let Some(key) = to_key(&key) { editor.handle_key(key); }
+                   log_new_failures(editor, &mut logged);
                    if editor.state().should_quit() { return Ok(()) }
                 }
                 Some(Ok(_)) => {}
@@ -83,19 +93,46 @@ async fn event_loop(terminal: &mut DefaultTerminal, editor: &mut Editor) -> io::
     }
 }
 
+/// Logs the module failures recorded since the previous call; `logged` counts the ones
+/// already logged.
+fn log_new_failures(editor: &Editor, logged: &mut usize) {
+    for failure in &editor.failures()[*logged..] {
+        log::error!("{failure}");
+    }
+    *logged = editor.failures().len();
+}
+
 /// Reads the document to edit; a missing file gives an empty document with that path.
 async fn load(path: Option<PathBuf>) -> io::Result<Document> {
     let doc = match path {
         Some(filepath) => {
             let text = match tokio::fs::read_to_string(&filepath).await {
-                Ok(file) => file,
-                Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
-                Err(e) => return Err(e),
+                Ok(file) => {
+                    log::info!(
+                        "Loaded document: {}, size: {}B",
+                        filepath.display(),
+                        file.len()
+                    );
+                    file
+                }
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    log::info!("Created new document: {}", filepath.display());
+                    String::new()
+                }
+                Err(e) => {
+                    return Err(io::Error::new(
+                        e.kind(),
+                        format!("cannot open {}: {e}", filepath.display()),
+                    ));
+                }
             };
 
             Document::from_text(Some(Uri::File(filepath)), &text)
         }
-        None => Document::scratch(),
+        None => {
+            log::info!("No path supplied in argument, creating scratchpad");
+            Document::scratch()
+        }
     };
     Ok(doc)
 }
@@ -130,6 +167,7 @@ fn to_key(event: &KeyEvent) -> Option<Key> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use revim_kernel::{keymap::Mode, module::Registrar};
 
     fn press(code: KeyCode, modifiers: KeyModifiers) -> Option<Key> {
         to_key(&KeyEvent::new(code, modifiers))
@@ -180,5 +218,35 @@ mod tests {
             KeyEventKind::Release,
         );
         assert_eq!(to_key(&release), None);
+    }
+
+    /// Registers `editor.quit` and `boom.now`, a command bound to `b` that always panics.
+    struct Boom;
+    impl Module for Boom {
+        fn id(&self) -> &'static str {
+            "boom"
+        }
+        fn register(&mut self, r: &mut Registrar) {
+            r.command("editor.quit", "Quit the editor", |cx| cx.quit());
+            r.command("boom.now", "Panic", |_| panic!("boom"));
+            r.keymap(Mode::Normal, "b", "boom.now");
+        }
+    }
+
+    #[test]
+    fn each_module_failure_is_logged_once() {
+        let state = EditorState::with_document(Document::scratch());
+        let mut editor = Editor::new(state, vec![Box::new(Boom)]).expect("modules register");
+        let mut logged = 0;
+
+        log_new_failures(&editor, &mut logged);
+        assert_eq!(logged, 0);
+
+        editor.handle_key(Key::Char('b'));
+        log_new_failures(&editor, &mut logged);
+        assert_eq!(logged, 1);
+
+        log_new_failures(&editor, &mut logged); // nothing new since the last call
+        assert_eq!(logged, 1);
     }
 }
