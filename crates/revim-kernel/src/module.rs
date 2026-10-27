@@ -22,9 +22,9 @@ pub trait Module: 'static {
 }
 
 /// A module that panicked and was disabled.
-#[derive(Debug, Clone, PartialEq, Eq)]
 ///
-/// `Display` gives `[module] message`.
+/// `Display` gives `[module] panicked and was disabled: message`.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModuleFailure {
     /// Id of the module that panicked.
     pub module: &'static str,
@@ -72,7 +72,14 @@ impl<'a> Registrar<'a> {
             self.error(RegisterErrorKind::DuplicateCommand {
                 command: name.to_string(),
             });
+            return;
         }
+        log::info!(
+            "Module [{}] registered command: {} ({})",
+            self.module,
+            name,
+            desc
+        );
     }
 
     /// Binds `key` (Vim notation: `"j"`, `"<C-q>"`, `"<Up>"`) in `mode` to `command`.
@@ -81,15 +88,17 @@ impl<'a> Registrar<'a> {
     /// have registered.
     pub fn keymap(&mut self, mode: Mode, key: &str, command: &str) {
         match parse_key(key) {
-            Ok(parsed) => {
-                if let Err(bound_to) = self.keymap.bind(mode, parsed, command, self.module) {
-                    self.error(RegisterErrorKind::DuplicateKey {
-                        mode,
-                        key: parsed,
-                        bound_to,
-                    });
-                }
-            }
+            Ok(parsed) => match self.keymap.bind(mode, parsed, command, self.module) {
+                Ok(()) => log::info!(
+                    "Module [{}] registered keymap: {key} for mode {mode} with command {command}",
+                    self.module,
+                ),
+                Err(bound_to) => self.error(RegisterErrorKind::DuplicateKey {
+                    mode,
+                    key: parsed,
+                    bound_to,
+                }),
+            },
             Err(reason) => {
                 self.error(RegisterErrorKind::InvalidKey {
                     key: key.to_string(),
@@ -130,10 +139,15 @@ pub struct RegisterError {
 #[non_exhaustive]
 pub enum RegisterErrorKind {
     /// A command with this name is already registered; the first one is kept.
-    DuplicateCommand { command: String },
+    DuplicateCommand {
+        /// Name of the command.
+        command: String,
+    },
     /// The key is already bound in this mode; the first binding is kept.
     DuplicateKey {
+        /// Mode of the binding.
         mode: Mode,
+        /// The key.
         key: Key,
         /// Command the key is already bound to.
         bound_to: String,
@@ -142,18 +156,25 @@ pub enum RegisterErrorKind {
     InvalidKey {
         /// The notation as written by the module.
         key: String,
+        /// Why it could not be parsed.
         reason: KeyParseError,
     },
     /// The key is bound to a command that no module registered.
     UnknownCommand {
+        /// Mode of the binding.
         mode: Mode,
+        /// The key.
         key: Key,
+        /// Name of the missing command.
         command: String,
     },
     /// No module registered `editor.quit`, so there would be no way to quit.
     MissingQuitCommand,
-    /// The module panicked in [`Module::register`]; holds the panic message.
-    ModulePanicked { message: String },
+    /// The module panicked in [`Module::register`].
+    ModulePanicked {
+        /// The panic message.
+        message: String,
+    },
 }
 
 impl fmt::Display for RegisterError {
@@ -191,7 +212,11 @@ impl fmt::Display for RegisterError {
 
 impl fmt::Display for ModuleFailure {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "[{}] {}", self.module, self.message)
+        write!(
+            f,
+            "[{}] panicked and was disabled: {}",
+            self.module, self.message
+        )
     }
 }
 
@@ -214,6 +239,62 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "[vim] key <C-q> (Normal) is bound to unknown command `editor.quitt`"
+        );
+    }
+
+    #[test]
+    fn display_of_every_error_kind() {
+        let cases = [
+            (
+                RegisterErrorKind::DuplicateCommand {
+                    command: "vim.move.down".into(),
+                },
+                "[vim] duplicate command `vim.move.down`",
+            ),
+            (
+                RegisterErrorKind::DuplicateKey {
+                    mode: Mode::Normal,
+                    key: Key::Char('j'),
+                    bound_to: "vim.move.down".into(),
+                },
+                "[vim] key j (Normal) is already bound to `vim.move.down`",
+            ),
+            (
+                RegisterErrorKind::InvalidKey {
+                    key: "<Foo>".into(),
+                    reason: KeyParseError::UnknownKey("<Foo>".into()),
+                },
+                "[vim] invalid key `<Foo>`: unknown key name",
+            ),
+            (
+                RegisterErrorKind::MissingQuitCommand,
+                "[vim] command `editor.quit` is not registered, the editor could not be closed",
+            ),
+            (
+                RegisterErrorKind::ModulePanicked {
+                    message: "boom".into(),
+                },
+                "[vim] panicked while registering: boom",
+            ),
+        ];
+        for (kind, expected) in cases {
+            let error = RegisterError {
+                module: "vim",
+                kind,
+            };
+            assert_eq!(error.to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn module_failure_display_says_the_module_was_disabled() {
+        let failure = ModuleFailure {
+            module: "gutter",
+            message: "index out of bounds".into(),
+        };
+        assert_eq!(
+            failure.to_string(),
+            "[gutter] panicked and was disabled: index out of bounds"
         );
     }
 }

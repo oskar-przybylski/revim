@@ -24,6 +24,12 @@ impl Module for Vim {
         r.command("vim.move.down", "Move cursor down", |cx| {
             cx.move_cursor(Motion::Down)
         });
+
+        r.command("vim.panic", "Move cursor down", |_cx| {
+            panic!("panic");
+        });
+        r.keymap(Mode::Normal, "p", "vim.panic");
+
         r.keymap(Mode::Normal, "h", "vim.move.left");
         r.keymap(Mode::Normal, "l", "vim.move.right");
         r.keymap(Mode::Normal, "k", "vim.move.up");

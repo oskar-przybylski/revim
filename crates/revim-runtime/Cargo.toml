@@ -10,3 +10,4 @@ ratatui = "0.30.2"
 tokio = { version = "1.54.1", features = ["rt", "macros", "time", "sync", "fs"] }
 revim-kernel = {path="../revim-kernel"}
 revim-ui = {path="../revim-ui"}
+log = "0.4.34"

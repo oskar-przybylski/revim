@@ -1,6 +1,6 @@
 use revim_api::Module;
 
-/// Modules loaded at startup, in order. Remove a line to disable a module;
+/// Modules loaded at startup, in order. Remove a line to disable a module.
 pub fn modules() -> Vec<Box<dyn Module>> {
     vec![
         Box::new(mod_builtin::Builtin),
