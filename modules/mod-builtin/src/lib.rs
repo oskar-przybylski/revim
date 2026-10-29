@@ -93,10 +93,10 @@ impl Builtin {
 mod tests {
     use super::*;
     use revim_api::testing::{Editor, press};
-    use revim_api::{Document, EditorState};
+    use revim_api::{Document, EditorState, Motion};
 
-    /// Test-only keys: `i` / `<Esc>` switch modes, `v` asks for an unknown mode, `D` deletes
-    /// two chars back, `X` passes an invalid count.
+    /// Test-only keys: `i` / `<Esc>` switch modes, `v` asks for an unknown mode, `<C-d>`
+    /// deletes two chars back, `<C-x>` passes an invalid count, `<Right>` moves right.
     struct Keys;
     impl Module for Keys {
         fn id(&self) -> &'static str {
@@ -108,6 +108,8 @@ mod tests {
             r.keymap(Mode::Insert, "<Esc>", "editor.change_mode", "Normal");
             r.keymap(Mode::Insert, "<C-d>", "editor.delete_backward", "2");
             r.keymap(Mode::Insert, "<C-x>", "editor.delete_backward", "x");
+            r.command("keys.right", "", |cx, _| cx.move_cursor(Motion::Right));
+            r.keymap(Mode::Insert, "<Right>", "keys.right", "");
         }
     }
 
@@ -163,7 +165,7 @@ mod tests {
     fn typing_in_insert_inserts_chars() {
         let mut ed = editor();
         type_keys(&mut ed, &["i", "a", "ż", "<Space>"]);
-        assert_eq!(text(&ed), "aż ");
+        assert_eq!(text(&ed), "aż \n");
         assert_eq!(cursor(&ed), 3);
     }
 
@@ -179,7 +181,7 @@ mod tests {
     fn typing_in_normal_inserts_nothing() {
         let mut ed = editor();
         assert!(!press(&mut ed, "a"));
-        assert_eq!(text(&ed), "");
+        assert_eq!(text(&ed), "\n");
     }
 
     #[test]
@@ -194,7 +196,7 @@ mod tests {
     fn backspace_deletes_the_char_before_the_cursor() {
         let mut ed = editor();
         type_keys(&mut ed, &["i", "a", "b", "<BS>"]);
-        assert_eq!(text(&ed), "a");
+        assert_eq!(text(&ed), "a\n");
         assert_eq!(cursor(&ed), 1);
     }
 
@@ -218,17 +220,41 @@ mod tests {
     fn delete_backward_takes_a_count() {
         let mut ed = editor();
         type_keys(&mut ed, &["i", "a", "b", "c", "<C-d>"]);
-        assert_eq!(text(&ed), "a");
+        assert_eq!(text(&ed), "a\n");
         type_keys(&mut ed, &["<C-d>"]); // only one char before the cursor
-        assert_eq!(text(&ed), "");
+        assert_eq!(text(&ed), "\n");
     }
 
     #[test]
     fn delete_backward_ignores_an_invalid_count() {
         let mut ed = editor();
         type_keys(&mut ed, &["i", "a", "<C-x>"]);
-        assert_eq!(text(&ed), "a");
+        assert_eq!(text(&ed), "a\n");
         assert!(ed.failures().is_empty());
+    }
+
+    #[test]
+    fn enter_in_an_empty_buffer_starts_a_new_line() {
+        // used to need two <CR>: after the first one the cursor was on a line that did not exist
+        let mut ed = editor();
+        type_keys(&mut ed, &["i", "a", "<CR>", "b"]);
+        assert_eq!(text(&ed), "a\nb\n");
+        assert_eq!(cursor(&ed), 3);
+    }
+
+    #[test]
+    fn last_char_of_a_line_can_be_deleted_after_moving_past_it() {
+        let mut ed = editor_on("ab\ncd\n");
+        type_keys(&mut ed, &["i", "<Right>", "<Right>", "<BS>"]);
+        assert_eq!(text(&ed), "a\ncd\n");
+        assert_eq!(cursor(&ed), 1);
+    }
+
+    #[test]
+    fn typing_after_the_last_char_appends_to_the_line() {
+        let mut ed = editor_on("ab\n");
+        type_keys(&mut ed, &["i", "<Right>", "<Right>", "c"]);
+        assert_eq!(text(&ed), "abc\n");
     }
 
     #[test]

@@ -105,7 +105,8 @@ impl EditorState {
         self.mode
     }
 
-    /// Moves the cursor of the focused window.
+    /// Moves the cursor of the focused window, as the current mode allows: in Insert it may go
+    /// after the last char of a line ([`Mode::cursor_past_end`]).
     ///
     /// ```
     /// use revim_core::movement::Motion;
@@ -118,7 +119,7 @@ impl EditorState {
     pub fn move_cursor(&mut self, motion: Motion) {
         let win = &mut self.windows[self.focused];
         let doc = &self.docs[win.doc()];
-        win.move_cursor(doc.text(), motion);
+        win.move_cursor(doc.text(), motion, self.mode.cursor_past_end());
     }
 
     /// Puts the cursor of every window showing `doc` on a valid position for the current mode.
@@ -187,6 +188,19 @@ mod tests {
         state.move_cursor(Motion::Down);
         state.move_cursor(Motion::Right);
         assert_eq!(state.focused_window().cursor(), 4); // 'd'
+    }
+
+    #[test]
+    fn move_cursor_in_insert_goes_after_the_last_char() {
+        let mut state = state("ab\ncd\n");
+        state.move_cursor(Motion::Right);
+        state.move_cursor(Motion::Right);
+        assert_eq!(state.focused_window().cursor(), 1); // Normal: stays on 'b'
+        state.set_mode(Mode::Insert);
+        state.move_cursor(Motion::Right);
+        assert_eq!(state.focused_window().cursor(), 2); // Insert: after 'b'
+        state.move_cursor(Motion::Down);
+        assert_eq!(state.focused_window().cursor(), 5); // after 'd'
     }
 
     #[test]

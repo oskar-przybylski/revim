@@ -83,21 +83,24 @@ impl Window {
     /// Moves the cursor by `motion` within `text` (the text of this window's document) and
     /// scrolls so that the cursor stays visible.
     ///
+    /// With `past_end` (Insert, see `Mode::cursor_past_end`) the cursor may go after the last
+    /// char of a line; without it (Normal) it stays on a char.
+    ///
     /// Vertical motions keep the sticky column: moving through a shorter line and back
     /// returns to the original column. Horizontal motions reset it.
-    pub fn move_cursor(&mut self, text: &Rope, motion: Motion) {
+    pub fn move_cursor(&mut self, text: &Rope, motion: Motion, past_end: bool) {
         match motion {
             Motion::Left => self.set_cursor(left(text, self.cursor()), None),
-            Motion::Right => self.set_cursor(right(text, self.cursor()), None),
+            Motion::Right => self.set_cursor(right(text, self.cursor(), past_end), None),
             Motion::Down => {
                 let col = self.desired_col.unwrap_or(column(text, self.cursor()));
-                let new_pos = down(text, self.cursor(), col);
+                let new_pos = down(text, self.cursor(), col, past_end);
                 self.set_cursor(new_pos, Some(col));
                 self.scroll_to_line(text.char_to_line(new_pos));
             }
             Motion::Up => {
                 let col = self.desired_col.unwrap_or(column(text, self.cursor()));
-                let new_pos = up(text, self.cursor(), col);
+                let new_pos = up(text, self.cursor(), col, past_end);
                 self.set_cursor(new_pos, Some(col));
                 self.scroll_to_line(text.char_to_line(new_pos));
             }
@@ -142,7 +145,7 @@ mod tests {
         let mut w = win();
         w.set_height(10);
         for _ in 0..30 {
-            w.move_cursor(&text, Motion::Down);
+            w.move_cursor(&text, Motion::Down, false);
         }
         assert_eq!(w.scroll(), 21);
     }
@@ -153,10 +156,10 @@ mod tests {
         let mut w = win();
         w.set_height(10);
         for _ in 0..4 {
-            w.move_cursor(&text, Motion::Right);
+            w.move_cursor(&text, Motion::Right, false);
         } // column 4
-        w.move_cursor(&text, Motion::Down); // "ab" → column 1
-        w.move_cursor(&text, Motion::Down); // back to column 4
+        w.move_cursor(&text, Motion::Down, false); // "ab" → column 1
+        w.move_cursor(&text, Motion::Down, false); // back to column 4
         assert_eq!(w.cursor(), 14);
     }
 
@@ -206,7 +209,7 @@ mod tests {
         let mut w = win();
         w.set_height(10);
         for _ in 0..15 {
-            w.move_cursor(&text, Motion::Down);
+            w.move_cursor(&text, Motion::Down, false);
         }
         assert_eq!(w.scroll(), 6); // line 15 is the last visible one: 6..=15
     }
@@ -217,10 +220,10 @@ mod tests {
         let mut w = win();
         w.set_height(10);
         for _ in 0..30 {
-            w.move_cursor(&text, Motion::Down);
+            w.move_cursor(&text, Motion::Down, false);
         }
         for _ in 0..30 {
-            w.move_cursor(&text, Motion::Up);
+            w.move_cursor(&text, Motion::Up, false);
         }
         assert_eq!((w.cursor(), w.scroll()), (0, 0));
     }
@@ -232,12 +235,12 @@ mod tests {
         let mut w = win();
         w.set_height(10);
         for _ in 0..4 {
-            w.move_cursor(&text, Motion::Right);
+            w.move_cursor(&text, Motion::Right, false);
         }
-        w.move_cursor(&text, Motion::Down); // 'b' in "ab", sticky column 4
-        w.move_cursor(&text, Motion::Left); // 'a', sticky column reset
+        w.move_cursor(&text, Motion::Down, false); // 'b' in "ab", sticky column 4
+        w.move_cursor(&text, Motion::Left, false); // 'a', sticky column reset
         assert_eq!(w.desired_col, None);
-        w.move_cursor(&text, Motion::Down); // column 0, not 4
+        w.move_cursor(&text, Motion::Down, false); // column 0, not 4
         assert_eq!(w.cursor(), 10);
     }
 
@@ -246,7 +249,7 @@ mod tests {
         let text = Rope::from_str(&"line\n".repeat(20));
         let mut w = win();
         for _ in 0..15 {
-            w.move_cursor(&text, Motion::Down);
+            w.move_cursor(&text, Motion::Down, false);
         }
         assert_eq!(w.scroll(), 0);
     }
@@ -256,7 +259,7 @@ mod tests {
         let text = Rope::from_str(&"line\n".repeat(50));
         let mut w = win();
         w.set_height(10);
-        w.move_cursor(&text, Motion::Down); // sticky column set
+        w.move_cursor(&text, Motion::Down, false); // sticky column set
         w.set_selection(&text, Selection::point(5 * 30)); // line 30
         assert_eq!((w.cursor(), w.desired_col, w.scroll()), (150, None, 21));
     }
@@ -265,7 +268,7 @@ mod tests {
     fn map_selection_follows_the_text() {
         let mut text = Rope::from_str("ab\n");
         let mut w = win();
-        w.move_cursor(&text, Motion::Right); // 'b'
+        w.move_cursor(&text, Motion::Right, false); // 'b'
         let changes = ChangeSet::replace(3, 0..0, "xy");
         changes.apply(&mut text);
         w.map_selection(&text, &changes);
@@ -281,5 +284,21 @@ mod tests {
         assert_eq!(w.cursor(), 2);
         w.clamp_cursor(&text, false);
         assert_eq!(w.cursor(), 1);
+    }
+
+    #[test]
+    fn past_end_lets_the_cursor_go_after_the_last_char() {
+        // a0 b1 \n2 | c3 d4 e5 \n6
+        let text = Rope::from_str("ab\ncde\n");
+        let mut w = win();
+        w.move_cursor(&text, Motion::Right, true);
+        w.move_cursor(&text, Motion::Right, true);
+        assert_eq!(w.cursor(), 2); // after 'b'
+        w.move_cursor(&text, Motion::Down, true);
+        assert_eq!(w.cursor(), 5); // column 2: on 'e'
+        w.move_cursor(&text, Motion::Right, true);
+        assert_eq!(w.cursor(), 6); // after 'e'
+        w.move_cursor(&text, Motion::Up, true);
+        assert_eq!(w.cursor(), 2); // column 3 does not fit "ab": after 'b'
     }
 }

@@ -1,6 +1,6 @@
 //! Vim motions and commands.
 
-use revim_api::{Ctx, Mode, Module, Motion, Registrar};
+use revim_api::{ChangeSet, Ctx, Mode, Module, Motion, Registrar, Selection, Transaction};
 
 /// Vim-style editing: `h` `j` `k` `l` and the arrow keys move the cursor (arrows also in
 /// Insert), `i` enters Insert, `<Esc>` goes back to Normal.
@@ -28,10 +28,13 @@ impl Module for Vim {
             cx.move_cursor(Motion::Down)
         });
 
+        r.command("vim.mode.normal", "Back to Normal mode", Vim::normal);
+        r.command("vim.mode.append", "Append after the cursor", Vim::append);
         r.command("vim.mode.insert", "Insert before the cursor", |cx, _| {
             cx.set_mode(Mode::Insert)
         });
-        r.command("vim.mode.normal", "Back to Normal mode", Vim::normal);
+
+        r.command("vim.move.delete", "Delete below the cursor", Vim::delete);
 
         r.keymap(Mode::Normal, "h", "vim.move.left", "");
         r.keymap(Mode::Normal, "l", "vim.move.right", "");
@@ -48,7 +51,10 @@ impl Module for Vim {
         r.keymap(Mode::Insert, "<Up>", "vim.move.up", "");
         r.keymap(Mode::Insert, "<Down>", "vim.move.down", "");
 
+        r.keymap(Mode::Normal, "x", "vim.move.delete", "");
+
         r.keymap(Mode::Normal, "i", "vim.mode.insert", "");
+        r.keymap(Mode::Normal, "a", "vim.mode.append", "");
         r.keymap(Mode::Insert, "<Esc>", "vim.mode.normal", "");
     }
 }
@@ -62,6 +68,28 @@ impl Vim {
             cx.move_cursor(Motion::Left);
         }
         cx.set_mode(Mode::Normal);
+    }
+    fn delete(cx: &mut Ctx, n: &str) {
+        let n = match n {
+            "" => 1,
+            n => match n.parse::<usize>() {
+                Ok(n) => n,
+                Err(_) => return,
+            },
+        };
+        let pos = cx.state().focused_window().cursor();
+        let n = n.min(pos);
+        if n == 0 {
+            return;
+        }
+        let len = cx.state().focused_doc().text().len_chars();
+        let tx = Transaction::new(ChangeSet::replace(len, pos..pos + n, ""))
+            .with_selection(Selection::point(pos));
+        cx.apply(tx);
+    }
+    fn append(cx: &mut Ctx, _args: &str) {
+        cx.set_mode(Mode::Insert);
+        cx.move_cursor(Motion::Right);
     }
 }
 
@@ -147,6 +175,26 @@ mod tests {
             assert_eq!(cursor(&ed), expected, "{key}");
         }
         assert_eq!(ed.state().mode(), Mode::Insert);
+    }
+
+    #[test]
+    fn right_arrow_in_insert_goes_after_the_last_char() {
+        let mut ed = editor("ab\n", vec![Box::new(Vim)]);
+        press(&mut ed, "i");
+        press(&mut ed, "<Right>");
+        press(&mut ed, "<Right>");
+        press(&mut ed, "<Right>");
+        assert_eq!(cursor(&ed), 2); // after 'b', not on the next line
+        press(&mut ed, "<Esc>");
+        assert_eq!(cursor(&ed), 1); // back on 'b'
+    }
+
+    #[test]
+    fn l_in_normal_stops_on_the_last_char() {
+        let mut ed = editor("ab\n", vec![Box::new(Vim)]);
+        press(&mut ed, "l");
+        press(&mut ed, "l");
+        assert_eq!(cursor(&ed), 1);
     }
 
     #[test]
