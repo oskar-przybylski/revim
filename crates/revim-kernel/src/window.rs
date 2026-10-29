@@ -2,7 +2,9 @@
 
 use revim_core::{
     change::ChangeSet,
-    movement::{Motion, clamp_cursor, column, down, left, right, up},
+    movement::{
+        Motion, clamp_cursor, column, down, first_non_white, left, line_end, line_start, right, up,
+    },
     selection::Selection,
 };
 use ropey::Rope;
@@ -92,6 +94,12 @@ impl Window {
         match motion {
             Motion::Left => self.set_cursor(left(text, self.cursor()), None),
             Motion::Right => self.set_cursor(right(text, self.cursor(), past_end), None),
+            Motion::LineStart => self.set_cursor(line_start(text, self.cursor()), None),
+            // like Vim's `$`: `j` / `k` afterwards also go to the end of the line
+            Motion::LineEnd => {
+                self.set_cursor(line_end(text, self.cursor(), past_end), Some(usize::MAX))
+            }
+            Motion::FirstNonWhite => self.set_cursor(first_non_white(text, self.cursor()), None),
             Motion::Down => {
                 let col = self.desired_col.unwrap_or(column(text, self.cursor()));
                 let new_pos = down(text, self.cursor(), col, past_end);
@@ -284,6 +292,38 @@ mod tests {
         assert_eq!(w.cursor(), 2);
         w.clamp_cursor(&text, false);
         assert_eq!(w.cursor(), 1);
+    }
+
+    #[test]
+    fn line_end_sticks_to_the_end_of_lines() {
+        // a0 b1 c2 \n3 | d4 \n5 | e6 f7 g8 h9 \n10
+        let text = Rope::from_str("abc\nd\nefgh\n");
+        let mut w = win();
+        w.move_cursor(&text, Motion::LineEnd, false);
+        assert_eq!(w.cursor(), 2);
+        w.move_cursor(&text, Motion::Down, false);
+        assert_eq!(w.cursor(), 4); // 'd'
+        w.move_cursor(&text, Motion::Down, false);
+        assert_eq!(w.cursor(), 9); // 'h', not column 2
+        w.move_cursor(&text, Motion::LineStart, false);
+        assert_eq!(w.cursor(), 6);
+        w.move_cursor(&text, Motion::Up, false);
+        assert_eq!(w.cursor(), 4); // sticky column reset by `0`
+    }
+
+    #[test]
+    fn first_non_white_resets_the_sticky_column() {
+        // a0 b1 c2 d3 \n4 | ␠5 ␠6 e7 f8 \n9 | g10 h11 i12 j13 \n14
+        let text = Rope::from_str("abcd\n  ef\nghij\n");
+        let mut w = win();
+        w.move_cursor(&text, Motion::LineEnd, false); // sticky column: end of line
+        w.move_cursor(&text, Motion::Down, false);
+        assert_eq!(w.cursor(), 8); // 'f'
+        w.move_cursor(&text, Motion::FirstNonWhite, false);
+        assert_eq!(w.cursor(), 7); // 'e'
+        assert_eq!(w.desired_col, None);
+        w.move_cursor(&text, Motion::Down, false);
+        assert_eq!(w.cursor(), 12); // column 2, not the end of the line
     }
 
     #[test]

@@ -30,7 +30,71 @@ pub enum Motion {
     Up,
     /// One line down (`j`), see [`down`].
     Down,
+    /// To the end of the line (`$`), see [`line_end`].
+    LineEnd,
+    /// To the start of the line (`0`), see [`line_start`].
+    LineStart,
+    /// To the first non-blank char of the line (`^`), see [`first_non_white`].
+    FirstNonWhite,
 }
+
+/// `$`: moves to the end of the line, never onto the line ending (`\n` or `\r\n`).
+///
+/// Without `past_end` (Normal) onto the last char of the line; with `past_end` (Insert)
+/// after it, where typed text is appended. On an empty line the position does not change.
+///
+/// ```
+/// use revim_core::movement::line_end;
+/// use ropey::Rope;
+///
+/// let text = Rope::from_str("abc\nde");
+/// assert_eq!(line_end(&text, 0, false), 2); // Normal: on 'c'
+/// assert_eq!(line_end(&text, 0, true), 3); // Insert: after 'c'
+/// assert_eq!(line_end(&text, 4, false), 5); // last line without '\n': on 'e'
+/// ```
+pub fn line_end(text: &Rope, pos: usize, past_end: bool) -> usize {
+    pos_in_line(text, text.char_to_line(pos), usize::MAX, past_end)
+}
+
+/// `0`: moves to the first char of the line (column 0), also on blanks.
+///
+/// ```
+/// use revim_core::movement::line_start;
+/// use ropey::Rope;
+///
+/// let text = Rope::from_str("abc\n  de");
+/// assert_eq!(line_start(&text, 2), 0);
+/// assert_eq!(line_start(&text, 7), 4); // on the first blank, not on 'd'
+/// ```
+pub fn line_start(text: &Rope, pos: usize) -> usize {
+    text.line_to_char(text.char_to_line(pos))
+}
+
+/// `^`: moves to the first char of the line that is not whitespace.
+///
+/// On a line of only whitespace onto its last char (as in Vim); on an empty line the position
+/// does not change. The cursor always ends up on a char, also in Insert, so there is no
+/// `past_end`.
+///
+/// ```
+/// use revim_core::movement::first_non_white;
+/// use ropey::Rope;
+///
+/// let text = Rope::from_str("  ab\n   \n");
+/// assert_eq!(first_non_white(&text, 0), 2); // on 'a'
+/// assert_eq!(first_non_white(&text, 3), 2); // also from the right
+/// assert_eq!(first_non_white(&text, 5), 7); // only blanks → on the last one
+/// ```
+pub fn first_non_white(text: &Rope, pos: usize) -> usize {
+    let line_idx = text.char_to_line(pos);
+    let line = text.line(line_idx);
+    let col = line
+        .chars()
+        .position(|c| !c.is_whitespace())
+        .unwrap_or(usize::MAX);
+    pos_in_line(text, line_idx, col, false)
+}
+
 /// `h`: moves one char left; does not wrap to the previous line.
 ///
 /// ```
@@ -461,6 +525,108 @@ mod tests {
         assert_eq!(down(&r, 7, 4, true), 12); // back to column 4: after "ghij"
         assert_eq!(up(&r, 12, 4, true), 7);
         assert_eq!(down(&r, 4, 4, false), 6); // Normal: on 'f'
+    }
+
+    #[test]
+    fn line_end_stops_on_the_last_char_in_normal() {
+        // a0 b1 c2 \n3 | d4 e5 \n6 | \n7 | f8 g9 h10 i11 j12
+        assert_eq!(line_end(&text(), 0, false), 2);
+        assert_eq!(line_end(&text(), 2, false), 2);
+        assert_eq!(line_end(&text(), 4, false), 5);
+        assert_eq!(line_end(&text(), 8, false), 12); // last line without '\n'
+    }
+
+    #[test]
+    fn line_end_goes_after_the_last_char_in_insert() {
+        assert_eq!(line_end(&text(), 0, true), 3);
+        assert_eq!(line_end(&text(), 3, true), 3); // already there
+        assert_eq!(line_end(&text(), 8, true), 13);
+    }
+
+    #[test]
+    fn line_end_on_empty_line_stays() {
+        assert_eq!(line_end(&text(), 7, false), 7);
+        assert_eq!(line_end(&text(), 7, true), 7);
+    }
+
+    #[test]
+    fn line_end_skips_carriage_return() {
+        // a0 b1 \r2 \n3
+        let r = Rope::from_str("ab\r\n");
+        assert_eq!(line_end(&r, 0, false), 1);
+        assert_eq!(line_end(&r, 0, true), 2);
+    }
+
+    #[test]
+    fn line_end_counts_chars_not_bytes() {
+        let r = Rope::from_str("αβγδ\nab");
+        assert_eq!(line_end(&r, 0, false), 3);
+        assert_eq!(line_end(&r, 0, true), 4);
+    }
+
+    #[test]
+    fn line_start_goes_to_column_zero() {
+        assert_eq!(line_start(&text(), 2), 0);
+        assert_eq!(line_start(&text(), 5), 4);
+        assert_eq!(line_start(&text(), 7), 7); // empty line
+        assert_eq!(line_start(&text(), 13), 8); // after the last char in Insert
+    }
+
+    #[test]
+    fn line_start_and_end_in_empty_text() {
+        let t = Rope::new();
+        assert_eq!(line_start(&t, 0), 0);
+        assert_eq!(line_end(&t, 0, false), 0);
+        assert_eq!(line_end(&t, 0, true), 0);
+    }
+
+    #[test]
+    fn first_non_white_skips_leading_blanks() {
+        // ␠0 ␠1 a2 b3 \n4 | \t5 ␠6 c7 \n8
+        let r = Rope::from_str("  ab\n\t c\n");
+        assert_eq!(first_non_white(&r, 0), 2);
+        assert_eq!(first_non_white(&r, 3), 2); // from the right of the first non-blank
+        assert_eq!(first_non_white(&r, 5), 7); // tab and space
+    }
+
+    #[test]
+    fn first_non_white_without_indent_goes_to_column_zero() {
+        // a0 b1 c2 \n3 | d4 e5 \n6 | \n7 | f8 g9 h10 i11 j12
+        assert_eq!(first_non_white(&text(), 2), 0);
+        assert_eq!(first_non_white(&text(), 12), 8); // last line without '\n'
+        assert_eq!(first_non_white(&text(), 13), 8); // after the last char in Insert
+    }
+
+    #[test]
+    fn first_non_white_on_blank_line_goes_to_the_last_blank() {
+        // ␠0 ␠1 ␠2 \n3 | x4
+        let r = Rope::from_str("   \nx");
+        assert_eq!(first_non_white(&r, 0), 2);
+        assert_eq!(first_non_white(&r, 3), 2); // from the '\n' (Insert after the last blank)
+    }
+
+    #[test]
+    fn first_non_white_on_empty_line_stays() {
+        assert_eq!(first_non_white(&text(), 7), 7);
+    }
+
+    #[test]
+    fn first_non_white_skips_carriage_return() {
+        // ␠0 ␠1 \r2 \n3
+        let r = Rope::from_str("  \r\n");
+        assert_eq!(first_non_white(&r, 0), 1); // last blank, not '\r'
+    }
+
+    #[test]
+    fn first_non_white_counts_chars_not_bytes() {
+        // ␠0 ␠1 α2 β3
+        let r = Rope::from_str("  αβ");
+        assert_eq!(first_non_white(&r, 3), 2);
+    }
+
+    #[test]
+    fn first_non_white_in_empty_text() {
+        assert_eq!(first_non_white(&Rope::new(), 0), 0);
     }
 
     #[test]

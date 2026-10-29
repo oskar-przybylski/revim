@@ -27,12 +27,32 @@ impl Module for Vim {
         r.command("vim.move.down", "Move cursor down", |cx, _| {
             cx.move_cursor(Motion::Down)
         });
+        r.command(
+            "vim.move.line_end",
+            "Move cursor to end of line",
+            |cx, _| cx.move_cursor(Motion::LineEnd),
+        );
+        r.command(
+            "vim.move.line_start",
+            "Move cursor to column 0 in current line",
+            |cx, _| cx.move_cursor(Motion::LineStart),
+        );
+        r.command(
+            "vim.move.first_non_white",
+            "Move cursor to first non white char in line",
+            |cx, _| cx.move_cursor(Motion::FirstNonWhite),
+        );
 
         r.command("vim.mode.normal", "Back to Normal mode", Vim::normal);
-        r.command("vim.mode.append", "Append after the cursor", Vim::append);
         r.command("vim.mode.insert", "Insert before the cursor", |cx, _| {
             cx.set_mode(Mode::Insert)
         });
+        r.command("vim.mode.append", "Append after the cursor", Vim::append);
+        r.command(
+            "vim.mode.append_line_end",
+            "Append after the last char in line",
+            Vim::append_line_end,
+        );
 
         r.command("vim.move.delete", "Delete below the cursor", Vim::delete);
 
@@ -52,9 +72,13 @@ impl Module for Vim {
         r.keymap(Mode::Insert, "<Down>", "vim.move.down", "");
 
         r.keymap(Mode::Normal, "x", "vim.move.delete", "");
+        r.keymap(Mode::Normal, "$", "vim.move.line_end", "");
+        r.keymap(Mode::Normal, "0", "vim.move.line_start", "");
+        r.keymap(Mode::Normal, "^", "vim.move.first_non_white", "");
 
         r.keymap(Mode::Normal, "i", "vim.mode.insert", "");
         r.keymap(Mode::Normal, "a", "vim.mode.append", "");
+        r.keymap(Mode::Normal, "A", "vim.mode.append_line_end", "");
         r.keymap(Mode::Insert, "<Esc>", "vim.mode.normal", "");
     }
 }
@@ -90,6 +114,10 @@ impl Vim {
     fn append(cx: &mut Ctx, _args: &str) {
         cx.set_mode(Mode::Insert);
         cx.move_cursor(Motion::Right);
+    }
+    fn append_line_end(cx: &mut Ctx, _args: &str) {
+        cx.set_mode(Mode::Insert);
+        cx.move_cursor(Motion::LineEnd);
     }
 }
 
@@ -195,6 +223,39 @@ mod tests {
         press(&mut ed, "l");
         press(&mut ed, "l");
         assert_eq!(cursor(&ed), 1);
+    }
+
+    #[test]
+    fn dollar_zero_and_caret_move_within_the_line() {
+        // ␠0 ␠1 a2 b3 c4 \n5
+        let mut ed = editor("  abc\n", vec![Box::new(Vim)]);
+        assert!(press(&mut ed, "$"));
+        assert_eq!(cursor(&ed), 4); // on 'c'
+        assert!(press(&mut ed, "^"));
+        assert_eq!(cursor(&ed), 2); // on 'a'
+        assert!(press(&mut ed, "0"));
+        assert_eq!(cursor(&ed), 0); // on the first blank
+    }
+
+    #[test]
+    fn dollar_then_j_stays_at_the_end_of_lines() {
+        // a0 b1 c2 \n3 | d4 \n5 | e6 f7 g8 h9 \n10
+        let mut ed = editor("abc\nd\nefgh\n", vec![Box::new(Vim)]);
+        press(&mut ed, "$");
+        press(&mut ed, "j");
+        press(&mut ed, "j");
+        assert_eq!(cursor(&ed), 9); // 'h'
+    }
+
+    #[test]
+    fn capital_a_appends_at_the_end_of_the_line() {
+        // a0 b1 \n2 | c3
+        let mut ed = editor("ab\nc\n", vec![Box::new(Vim)]);
+        assert!(press(&mut ed, "A"));
+        assert_eq!(ed.state().mode(), Mode::Insert);
+        assert_eq!(cursor(&ed), 2); // after 'b', not on the next line
+        press(&mut ed, "<Esc>");
+        assert_eq!(cursor(&ed), 1); // back on 'b'
     }
 
     #[test]
