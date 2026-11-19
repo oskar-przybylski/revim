@@ -61,7 +61,12 @@ impl<'a> Registrar<'a> {
 
     /// Registers a command. `name` must be unique (by convention `module.object.action`),
     /// `desc` is a short description for key hints and the command palette.
-    pub fn command(&mut self, name: &str, desc: &str, handler: impl Fn(&mut Ctx) + 'static) {
+    ///
+    /// The handler gets the argument of the call as one raw string: from the key binding
+    /// ([`keymap`](Self::keymap)), the typed char ([`keymap_fallback`](Self::keymap_fallback))
+    /// or [`Ctx::exec`]. Empty means no argument. The kernel does not split or check it — the
+    /// handler parses it and should do nothing (not panic) on an argument it does not accept.
+    pub fn command(&mut self, name: &str, desc: &str, handler: impl Fn(&mut Ctx, &str) + 'static) {
         let cmd = Command {
             name: name.to_string(),
             desc: desc.to_string(),
@@ -82,13 +87,41 @@ impl<'a> Registrar<'a> {
         );
     }
 
-    /// Binds `key` (Vim notation: `"j"`, `"<C-q>"`, `"<Up>"`) in `mode` to `command`.
+    /// Runs `command` for every char ([`Key::Char`]) typed in `mode` that has no key binding,
+    /// with the char as the argument. A key binding always wins over the fallback.
+    ///
+    /// A mode has at most one fallback; a second one is reported as
+    /// [`RegisterErrorKind::DuplicateFallback`]. Whether `command` exists is checked after all
+    /// modules have registered.
+    ///
+    /// ```
+    /// use revim_kernel::{keymap::Mode, module::Registrar};
+    ///
+    /// fn register(r: &mut Registrar) {
+    ///     r.command("my.insert", "Insert text", |_cx, text| {
+    ///         let _ = text; // "a" when `a` is typed in Insert
+    ///     });
+    ///     r.keymap_fallback(Mode::Insert, "my.insert");
+    /// }
+    /// ```
+    pub fn keymap_fallback(&mut self, mode: Mode, command: &str) {
+        match self.keymap.set_fallback(mode, command, self.module) {
+            Ok(()) => log::info!(
+                "Module [{}] registered keymap fallback for mode {mode} with command {command}",
+                self.module,
+            ),
+            Err(bound_to) => self.error(RegisterErrorKind::DuplicateFallback { mode, bound_to }),
+        }
+    }
+
+    /// Binds `key` (Vim notation: `"j"`, `"<C-q>"`, `"<Up>"`) in `mode` to `command`, which
+    /// gets `args` as its argument (`""` for none), e.g. `<CR>` → `editor.insert` with `"\n"`.
     ///
     /// The command may belong to any module; whether it exists is checked after all modules
     /// have registered.
-    pub fn keymap(&mut self, mode: Mode, key: &str, command: &str) {
+    pub fn keymap(&mut self, mode: Mode, key: &str, command: &str, args: &str) {
         match parse_key(key) {
-            Ok(parsed) => match self.keymap.bind(mode, parsed, command, self.module) {
+            Ok(parsed) => match self.keymap.bind(mode, parsed, command, args, self.module) {
                 Ok(()) => log::info!(
                     "Module [{}] registered keymap: {key} for mode {mode} with command {command}",
                     self.module,
@@ -152,6 +185,20 @@ pub enum RegisterErrorKind {
         /// Command the key is already bound to.
         bound_to: String,
     },
+    /// The mode already has a fallback; the first one is kept.
+    DuplicateFallback {
+        /// Mode of the fallback.
+        mode: Mode,
+        /// Command the fallback already points to.
+        bound_to: String,
+    },
+    /// The fallback of a mode points to a command that no module registered.
+    UnknownFallbackCommand {
+        /// Mode of the fallback.
+        mode: Mode,
+        /// Name of the missing command.
+        command: String,
+    },
     /// The key notation could not be parsed.
     InvalidKey {
         /// The notation as written by the module.
@@ -190,6 +237,12 @@ impl fmt::Display for RegisterError {
                 bound_to,
             } => {
                 write!(f, "key {key} ({mode}) is already bound to `{bound_to}`")
+            }
+            RegisterErrorKind::DuplicateFallback { mode, bound_to } => {
+                write!(f, "{mode} already has fallback bound to `{bound_to}`")
+            }
+            RegisterErrorKind::UnknownFallbackCommand { mode, command } => {
+                write!(f, "{mode} has fallback set to unknown command `{command}`")
             }
             RegisterErrorKind::InvalidKey { key, reason } => {
                 write!(f, "invalid key `{key}`: {reason}")
@@ -258,6 +311,20 @@ mod tests {
                     bound_to: "vim.move.down".into(),
                 },
                 "[vim] key j (Normal) is already bound to `vim.move.down`",
+            ),
+            (
+                RegisterErrorKind::DuplicateFallback {
+                    mode: Mode::Insert,
+                    bound_to: "editor.insert".into(),
+                },
+                "[vim] Insert already has fallback bound to `editor.insert`",
+            ),
+            (
+                RegisterErrorKind::UnknownFallbackCommand {
+                    mode: Mode::Insert,
+                    command: "editor.insert".into(),
+                },
+                "[vim] Insert has fallback set to unknown command `editor.insert`",
             ),
             (
                 RegisterErrorKind::InvalidKey {

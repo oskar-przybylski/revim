@@ -5,10 +5,10 @@ use std::collections::{HashSet, VecDeque};
 use crate::{
     command::CommandRegistry,
     ctx::Ctx,
-    event::{self, Effect, Event},
+    event::{Effect, Event},
     gutter::{GutterColumn, GutterContext, GutterProviderRegistry},
     key::Key,
-    keymap::{Keymap, Mode},
+    keymap::Keymap,
     module::{Module, ModuleFailure, RegisterError, RegisterErrorKind, Registrar},
     panic::run_guarded,
     state::EditorState,
@@ -37,7 +37,6 @@ pub struct Editor {
     keymap: Keymap,
     gutters: GutterProviderRegistry,
     effects: VecDeque<Effect>,
-    mode: Mode,
 }
 
 impl Editor {
@@ -76,19 +75,27 @@ impl Editor {
 
         // Checked after all modules registered: a key may point to a command of a module
         // that comes later in the list.
-        let mut unknown = Vec::new();
-        for (&(mode, key), binding) in keymap.bindings() {
-            if !commands.contains(&binding.command) {
-                unknown.push(RegisterError {
-                    module: binding.module,
-                    kind: RegisterErrorKind::UnknownCommand {
-                        mode,
-                        key,
-                        command: binding.command.clone(),
+        let mut unknown: Vec<RegisterError> = keymap
+            .fallbacks()
+            .map(|(&mode, b)| (mode, None, b))
+            .chain(
+                keymap
+                    .bindings()
+                    .map(|(&(mode, key), b)| (mode, Some(key), b)),
+            )
+            .filter(|(_, _, b)| !commands.contains(&b.command))
+            .map(|(mode, key, b)| {
+                let command = b.command.clone();
+                RegisterError {
+                    module: b.module,
+                    kind: match key {
+                        None => RegisterErrorKind::UnknownFallbackCommand { mode, command },
+                        Some(key) => RegisterErrorKind::UnknownCommand { mode, key, command },
                     },
-                });
-            }
-        }
+                }
+            })
+            .collect();
+
         // HashMap order is random; sort so that the report is the same on every run.
         unknown.sort_by_key(ToString::to_string);
         errors.extend(unknown);
@@ -105,12 +112,9 @@ impl Editor {
         }
 
         let mut effects: VecDeque<Effect> = VecDeque::new();
-        event::emit(
-            &mut effects,
-            Event::DocumentOpened {
-                doc: state.focused_doc_id(),
-            },
-        );
+        effects.push_back(Effect::Emit(Event::DocumentOpened {
+            doc: state.focused_doc_id(),
+        }));
 
         let mut editor = Self {
             state,
@@ -121,7 +125,6 @@ impl Editor {
             keymap,
             gutters,
             effects,
-            mode: Mode::Normal,
         };
         editor.drain();
         Ok(editor)
@@ -136,19 +139,30 @@ impl Editor {
         &mut self.state
     }
 
-    /// Runs the command bound to `key` in the current mode, then everything it queued.
+    /// Runs the command bound to `key` in the current mode, with the binding's argument, then
+    /// everything it queued. A char ([`Key::Char`]) without a binding runs the fallback of the
+    /// mode, if there is one, with the char as the argument.
     ///
-    /// Returns `false` if the key is not bound (nothing happens). A key bound to a command of
-    /// a disabled module returns `true` and does nothing.
+    /// Returns `false` if neither applies (nothing happens). A key bound to a command of a
+    /// disabled module returns `true` and does nothing.
     pub fn handle_key(&mut self, key: Key) -> bool {
-        if let Some(bind) = self.keymap.lookup(self.mode, key) {
-            self.effects
-                .push_back(Effect::Exec(bind.command.to_string()));
-            self.drain();
-            true
+        let mode = self.state.mode();
+        let effect = if let Some(bind) = self.keymap.lookup(mode, key) {
+            Effect::Exec {
+                command: bind.command.clone(),
+                args: bind.args.clone(),
+            }
+        } else if let (Key::Char(c), Some(fb)) = (key, self.keymap.fallback(mode)) {
+            Effect::Exec {
+                command: fb.command.clone(),
+                args: c.to_string(),
+            }
         } else {
-            false
-        }
+            return false;
+        };
+        self.effects.push_back(effect);
+        self.drain();
+        true
     }
 
     /// Runs queued effects until the queue is empty or [`MAX_EFFECTS`] is reached; then the rest
@@ -171,14 +185,14 @@ impl Editor {
 
             let mut ctx = Ctx::new(&mut self.state, &mut self.effects);
             match effect {
-                Effect::Exec(name) => {
-                    let Some(cmd) = self.commands.get(&name) else {
+                Effect::Exec { command, args } => {
+                    let Some(cmd) = self.commands.get(&command) else {
                         continue;
                     };
                     if self.disabled_modules.contains(cmd.module) {
                         continue;
                     }
-                    if let Err(message) = run_guarded(|| (cmd.handler)(&mut ctx)) {
+                    if let Err(message) = run_guarded(|| (cmd.handler)(&mut ctx, &args)) {
                         record_failure(
                             &mut self.disabled_modules,
                             &mut self.failures,
@@ -272,8 +286,10 @@ mod tests {
     use std::{cell::Cell, rc::Rc};
 
     use super::*;
-    use crate::{document::Document, key::KeyParseError};
-    use revim_core::movement::Motion;
+    use crate::{document::Document, key::KeyParseError, keymap::Mode};
+    use revim_core::{
+        change::ChangeSet, movement::Motion, selection::Selection, transaction::Transaction,
+    };
 
     /// A module whose registration is a plain function.
     struct TestModule(&'static str, fn(&mut Registrar));
@@ -294,8 +310,8 @@ mod tests {
     }
 
     fn quit(r: &mut Registrar) {
-        r.command("editor.quit", "Quit the editor", |cx| cx.quit());
-        r.keymap(Mode::Normal, "<C-q>", "editor.quit");
+        r.command("editor.quit", "Quit the editor", |cx, _| cx.quit());
+        r.keymap(Mode::Normal, "<C-q>", "editor.quit", "");
     }
 
     #[test]
@@ -307,12 +323,12 @@ mod tests {
     fn reports_every_error_with_its_module() {
         let modules: Vec<Box<dyn Module>> = vec![
             Box::new(TestModule("a", |r| {
-                r.command("a.x", "", |_| {});
-                r.command("a.x", "", |_| {});
-                r.keymap(Mode::Normal, "<Foo>", "a.x");
-                r.keymap(Mode::Normal, "j", "a.missing");
+                r.command("a.x", "", |_, _| {});
+                r.command("a.x", "", |_, _| {});
+                r.keymap(Mode::Normal, "<Foo>", "a.x", "");
+                r.keymap(Mode::Normal, "j", "a.missing", "");
             })),
-            Box::new(TestModule("b", |r| r.keymap(Mode::Normal, "j", "a.x"))),
+            Box::new(TestModule("b", |r| r.keymap(Mode::Normal, "j", "a.x", ""))),
         ];
         let error = |module, kind| RegisterError { module, kind };
         assert_eq!(
@@ -358,7 +374,7 @@ mod tests {
             Box::new(TestModule("editor", quit)),
             Box::new(TestModule("a", |r| {
                 for key in ["a", "b", "c", "d", "e", "f"] {
-                    r.keymap(Mode::Normal, key, "a.missing");
+                    r.keymap(Mode::Normal, key, "a.missing", "");
                 }
             })),
         ];
@@ -384,17 +400,17 @@ mod tests {
         }
         fn register(&mut self, r: &mut Registrar) {
             quit(r);
-            r.command("probe.down", "", |cx| cx.move_cursor(Motion::Down));
-            r.command("probe.loop", "", |cx| cx.exec("probe.loop"));
-            r.command("probe.deferred", "", |cx| {
+            r.command("probe.down", "", |cx, _| cx.move_cursor(Motion::Down));
+            r.command("probe.loop", "", |cx, _| cx.exec("probe.loop", ""));
+            r.command("probe.deferred", "", |cx, _| {
                 let before = cx.state().focused_window().cursor();
-                cx.exec("probe.down");
+                cx.exec("probe.down", "");
                 // `exec` is deferred: the cursor has not moved yet
                 assert_eq!(cx.state().focused_window().cursor(), before);
             });
-            r.keymap(Mode::Normal, "j", "probe.down");
-            r.keymap(Mode::Normal, "L", "probe.loop");
-            r.keymap(Mode::Normal, "d", "probe.deferred");
+            r.keymap(Mode::Normal, "j", "probe.down", "");
+            r.keymap(Mode::Normal, "L", "probe.loop", "");
+            r.keymap(Mode::Normal, "d", "probe.deferred", "");
         }
         fn on_event(&mut self, event: &Event, _cx: &mut Ctx) {
             if matches!(event, Event::CursorMoved { .. }) {
@@ -473,6 +489,213 @@ mod tests {
         assert_eq!(editor.state().focused_window().cursor(), 2);
     }
 
+    // ----- arguments, modes and fallbacks -----
+
+    thread_local! {
+        /// Arguments `rec.arg` was called with, in order (a plain `fn` registration cannot
+        /// capture an `Rc`).
+        static ARGS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    fn recorded() -> Vec<String> {
+        ARGS.with(|a| a.borrow().clone())
+    }
+
+    /// `i` switches to Insert, `<Esc>` back; `rec.arg` records its argument; typing in Insert
+    /// runs `rec.arg` through the fallback.
+    fn recorder(r: &mut Registrar) {
+        quit(r);
+        r.command("rec.arg", "", |_, args| {
+            ARGS.with(|a| a.borrow_mut().push(args.to_string()))
+        });
+        r.command("rec.insert", "", |cx, _| cx.set_mode(Mode::Insert));
+        r.command("rec.normal", "", |cx, _| cx.set_mode(Mode::Normal));
+        r.command("rec.exec", "", |cx, args| cx.exec("rec.arg", args));
+        r.keymap(Mode::Normal, "i", "rec.insert", "");
+        r.keymap(Mode::Normal, "a", "rec.arg", "from binding");
+        r.keymap(Mode::Normal, "e", "rec.exec", "from exec");
+        r.keymap(Mode::Insert, "<Esc>", "rec.normal", "");
+        r.keymap(Mode::Insert, "<CR>", "rec.arg", "\n");
+        r.keymap(Mode::Insert, "(", "rec.arg", "()");
+        r.keymap_fallback(Mode::Insert, "rec.arg");
+    }
+
+    fn recorder_editor() -> Editor {
+        ARGS.with(|a| a.borrow_mut().clear());
+        let state = EditorState::with_document(Document::scratch());
+        Editor::new(state, vec![Box::new(TestModule("rec", recorder))]).unwrap()
+    }
+
+    #[test]
+    fn binding_passes_its_argument() {
+        let mut editor = recorder_editor();
+        assert!(editor.handle_key(Key::Char('a')));
+        assert_eq!(recorded(), ["from binding"]);
+    }
+
+    #[test]
+    fn exec_passes_its_argument() {
+        let mut editor = recorder_editor();
+        editor.handle_key(Key::Char('e'));
+        assert_eq!(recorded(), ["from exec"]);
+    }
+
+    #[test]
+    fn keys_are_looked_up_in_the_current_mode() {
+        let mut editor = recorder_editor();
+        assert!(!editor.handle_key(Key::Esc)); // bound only in Insert
+        editor.handle_key(Key::Char('i'));
+        assert_eq!(editor.state().mode(), Mode::Insert);
+        assert!(editor.handle_key(Key::Esc));
+        assert_eq!(editor.state().mode(), Mode::Normal);
+    }
+
+    #[test]
+    fn fallback_gets_the_typed_char() {
+        let mut editor = recorder_editor();
+        editor.handle_key(Key::Char('i'));
+        assert!(editor.handle_key(Key::Char('x')));
+        assert!(editor.handle_key(Key::Char('ż')));
+        assert!(editor.handle_key(Key::Char(' ')));
+        assert_eq!(recorded(), ["x", "ż", " "]);
+    }
+
+    #[test]
+    fn binding_wins_over_fallback() {
+        let mut editor = recorder_editor();
+        editor.handle_key(Key::Char('i'));
+        editor.handle_key(Key::Char('('));
+        editor.handle_key(Key::Enter);
+        assert_eq!(recorded(), ["()", "\n"]);
+    }
+
+    #[test]
+    fn fallback_is_only_for_chars() {
+        let mut editor = recorder_editor();
+        editor.handle_key(Key::Char('i'));
+        assert!(!editor.handle_key(Key::Ctrl('x')));
+        assert!(!editor.handle_key(Key::Up));
+        assert!(!editor.handle_key(Key::Tab));
+        assert_eq!(recorded(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn mode_without_fallback_ignores_unbound_chars() {
+        let mut editor = recorder_editor();
+        assert!(!editor.handle_key(Key::Char('x'))); // Normal has no fallback
+        assert_eq!(recorded(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn fallback_errors_are_reported() {
+        let errors = register(vec![
+            Box::new(TestModule("editor", quit)),
+            Box::new(TestModule("a", |r| {
+                r.keymap_fallback(Mode::Insert, "a.missing")
+            })),
+            Box::new(TestModule("b", |r| {
+                r.keymap_fallback(Mode::Insert, "b.other")
+            })),
+        ]);
+        assert_eq!(
+            errors,
+            [
+                RegisterError {
+                    module: "b",
+                    kind: RegisterErrorKind::DuplicateFallback {
+                        mode: Mode::Insert,
+                        bound_to: "a.missing".into(),
+                    },
+                },
+                RegisterError {
+                    module: "a",
+                    kind: RegisterErrorKind::UnknownFallbackCommand {
+                        mode: Mode::Insert,
+                        command: "a.missing".into(),
+                    },
+                },
+            ]
+        );
+    }
+
+    thread_local! {
+        /// Events seen by [`EventLog`], in order.
+        static EVENTS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// Records the events it gets; `t` in Insert types "t" with [`Ctx::apply`].
+    struct EventLog;
+    impl Module for EventLog {
+        fn id(&self) -> &'static str {
+            "log"
+        }
+        fn register(&mut self, r: &mut Registrar) {
+            r.command("log.type", "", |cx, _| {
+                let pos = cx.state().focused_window().cursor();
+                let len = cx.state().focused_doc().text().len_chars();
+                let tx = Transaction::new(ChangeSet::replace(len, pos..pos, "t"))
+                    .with_selection(Selection::point(pos + 1));
+                cx.apply(tx);
+            });
+            r.keymap(Mode::Insert, "t", "log.type", "");
+        }
+        fn on_event(&mut self, event: &Event, _cx: &mut Ctx) {
+            let name = match event {
+                Event::DocChanged { version, .. } => format!("DocChanged v{version}"),
+                Event::ModeChanged => "ModeChanged".to_string(),
+                Event::CursorMoved { .. } => "CursorMoved".to_string(),
+                _ => return,
+            };
+            EVENTS.with(|e| e.borrow_mut().push(name));
+        }
+    }
+
+    fn event_log_editor(text: &str) -> Editor {
+        ARGS.with(|a| a.borrow_mut().clear());
+        let state = EditorState::with_document(Document::from_text(None, text));
+        let editor = Editor::new(
+            state,
+            vec![Box::new(TestModule("rec", recorder)), Box::new(EventLog)],
+        )
+        .unwrap();
+        EVENTS.with(|e| e.borrow_mut().clear());
+        editor
+    }
+
+    fn events() -> Vec<String> {
+        EVENTS.with(|e| e.borrow().clone())
+    }
+
+    #[test]
+    fn set_mode_emits_mode_changed() {
+        let mut editor = event_log_editor("a\n");
+        editor.handle_key(Key::Char('i'));
+        assert_eq!(events(), ["ModeChanged"]);
+    }
+
+    #[test]
+    fn apply_emits_doc_changed_with_the_new_version() {
+        let mut editor = event_log_editor("a\n");
+        editor.handle_key(Key::Char('i'));
+        editor.handle_key(Key::Char('t'));
+        editor.handle_key(Key::Char('t'));
+        assert_eq!(events(), ["ModeChanged", "DocChanged v1", "DocChanged v2"]);
+        assert_eq!(editor.state().focused_doc().text().to_string(), "tta\n");
+    }
+
+    #[test]
+    fn leaving_insert_after_the_line_end_moves_the_cursor_back() {
+        let mut editor = event_log_editor("");
+        editor.handle_key(Key::Char('i'));
+        editor.handle_key(Key::Char('t'));
+        editor.handle_key(Key::Char('t'));
+        assert_eq!(editor.state().focused_window().cursor(), 2); // after "tt"
+        EVENTS.with(|e| e.borrow_mut().clear());
+        editor.handle_key(Key::Esc);
+        assert_eq!(editor.state().focused_window().cursor(), 1); // on the last 't'
+        assert_eq!(events(), ["CursorMoved", "ModeChanged"]);
+    }
+
     #[test]
     fn quit_command_sets_the_flag() {
         let (mut editor, _) = editor_with_probe("a\n");
@@ -495,11 +718,11 @@ mod tests {
         }
         fn register(&mut self, r: &mut Registrar) {
             let calls = self.handler_calls.clone();
-            r.command("boom.now", "", move |_| {
+            r.command("boom.now", "", move |_, _| {
                 calls.set(calls.get() + 1);
                 panic!("handler failed");
             });
-            r.keymap(Mode::Normal, "b", "boom.now");
+            r.keymap(Mode::Normal, "b", "boom.now", "");
         }
         fn on_event(&mut self, _event: &Event, _cx: &mut Ctx) {
             self.event_calls.set(self.event_calls.get() + 1);
@@ -552,7 +775,7 @@ mod tests {
             Box::new(TestModule("editor", quit)),
             Box::new(TestModule("boom", |_| panic!("register failed"))),
             Box::new(TestModule("bad", |r| {
-                r.keymap(Mode::Normal, "<Foo>", "editor.quit")
+                r.keymap(Mode::Normal, "<Foo>", "editor.quit", "")
             })),
         ]);
         assert_eq!(errors.len(), 2, "{errors:?}");
@@ -755,8 +978,8 @@ mod tests {
         let mut editor = gutter_editor(
             "a\n",
             vec![Box::new(TestModule("boom", |r| {
-                r.command("boom.now", "", |_| panic!("handler failed"));
-                r.keymap(Mode::Normal, "b", "boom.now");
+                r.command("boom.now", "", |_, _| panic!("handler failed"));
+                r.keymap(Mode::Normal, "b", "boom.now", "");
                 r.gutter(LineIndex(""));
             }))],
         );

@@ -1,11 +1,12 @@
 use revim_api::Module;
 
 /// Modules loaded at startup, in order. Remove a line to disable a module.
+#[rustfmt::skip]
 pub fn modules() -> Vec<Box<dyn Module>> {
-    vec![
-        Box::new(mod_builtin::Builtin),
-        Box::new(mod_vim::Vim),
-        Box::new(mod_gutter::Gutter),
+    revim_api::modules![
+        mod_builtin::Builtin,
+        mod_vim::Vim,
+        mod_gutter::Gutter,
     ]
 }
 

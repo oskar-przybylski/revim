@@ -27,6 +27,10 @@ pub enum Key {
     Enter,
     /// Backspace (`<BS>`; `<Backspace>` parses to it too).
     Backspace,
+    /// Home (`<Home>`).
+    Home,
+    /// End (`<End>`).
+    End,
     /// Tab (`<Tab>`).
     Tab,
 }
@@ -56,6 +60,8 @@ impl fmt::Display for Key {
             Key::Esc => f.write_str("<Esc>"),
             Key::Enter => f.write_str("<CR>"),
             Key::Backspace => f.write_str("<BS>"),
+            Key::Home => f.write_str("<Home>"),
+            Key::End => f.write_str("<End>"),
             Key::Tab => f.write_str("<Tab>"),
         }
     }
@@ -132,6 +138,8 @@ fn parse_bracketed(inner: &str) -> Option<Key> {
         ("return", Key::Enter),
         ("bs", Key::Backspace),
         ("backspace", Key::Backspace),
+        ("home", Key::Home),
+        ("end", Key::End),
         ("tab", Key::Tab),
         ("space", Key::Char(' ')),
         ("lt", Key::Char('<')),

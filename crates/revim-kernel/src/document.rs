@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use revim_core::movement::line_count;
+use revim_core::{change::ChangeSet, movement::line_count};
 use ropey::Rope;
 
 /// Address of a document: where its text comes from and where it is saved.
@@ -33,27 +33,29 @@ pub struct Document {
 }
 
 impl Document {
-    /// Creates an empty document not tied to any file.
+    /// Creates an empty document not tied to any file: one empty line, so its text is `"\n"`
+    /// (see [`from_text`](Self::from_text) for why).
     ///
     /// ```
     /// use revim_kernel::document::Document;
     ///
     /// let doc = Document::scratch();
-    /// assert_eq!(doc.text().len_chars(), 0);
+    /// assert_eq!(doc.text().to_string(), "\n");
+    /// assert_eq!(doc.line_count(), 1);
     /// assert!(doc.uri().is_none());
     /// assert_eq!(doc.version(), 0);
     /// ```
     pub fn scratch() -> Self {
-        Self {
-            text: Rope::new(),
-            uri: None,
-            version: 0,
-        }
+        Self::from_text(None, "")
     }
     /// Creates a document with the given text and address, at version 0.
     ///
     /// Pass `Some(uri)` with an empty `text` for a file that does not exist yet (it will be
     /// created on save), `None` for a scratch buffer with initial content.
+    ///
+    /// An empty `text` gives one empty line, `"\n"`, as in Vim: lines are counted without the
+    /// line ending after the last line ([`line_count`](Self::line_count)), so `""` would have no
+    /// line to put the cursor on after `<CR>`.
     ///
     /// ```
     /// use revim_kernel::document::{Document, Uri};
@@ -62,13 +64,13 @@ impl Document {
     /// assert_eq!(doc.text().to_string(), "fn main() {}\n");
     /// assert_eq!(doc.uri(), Some(&Uri::File("a.rs".into())));
     ///
-    /// // a new, not yet existing file
+    /// // a new, not yet existing file: one empty line
     /// let new = Document::from_text(Some(Uri::File("new.rs".into())), "");
-    /// assert_eq!(new.text().len_chars(), 0);
+    /// assert_eq!(new.text().to_string(), "\n");
     /// ```
     pub fn from_text(uri: Option<Uri>, text: &str) -> Self {
         Self {
-            text: Rope::from_str(text),
+            text: Rope::from_str(if text.is_empty() { "\n" } else { text }),
             uri,
             version: 0,
         }
@@ -88,6 +90,15 @@ impl Document {
     /// Number of lines as Vim counts them: a trailing line ending does not start a new line.
     pub fn line_count(&self) -> usize {
         line_count(&self.text)
+    }
+
+    /// Applies `change_set` to the text and increases the version by one.
+    ///
+    /// # Panics
+    /// If `change_set` does not fit the text ([`ChangeSet::apply`]).
+    pub(crate) fn apply(&mut self, change_set: &ChangeSet) {
+        change_set.apply(&mut self.text);
+        self.version += 1;
     }
 }
 
@@ -111,9 +122,32 @@ mod tests {
     }
 
     #[test]
-    fn scratch_is_empty_without_uri() {
+    fn scratch_is_one_empty_line_without_uri() {
         let doc = Document::scratch();
-        assert_eq!(doc.text().len_chars(), 0);
+        assert_eq!(doc.text().to_string(), "\n");
+        assert_eq!(doc.line_count(), 1);
         assert!(doc.uri().is_none());
+    }
+
+    #[test]
+    fn empty_text_becomes_one_empty_line() {
+        let doc = Document::from_text(Some(Uri::File("new.rs".into())), "");
+        assert_eq!(doc.text().to_string(), "\n");
+        assert_eq!(doc.version(), 0);
+    }
+
+    #[test]
+    fn non_empty_text_is_kept_as_it_is() {
+        // a missing final line ending is not added (yet)
+        assert_eq!(Document::from_text(None, "ab").text().to_string(), "ab");
+    }
+
+    #[test]
+    fn apply_changes_the_text_and_bumps_the_version() {
+        let mut doc = Document::from_text(None, "ab\n");
+        doc.apply(&ChangeSet::replace(3, 1..1, "X"));
+        doc.apply(&ChangeSet::replace(4, 0..1, ""));
+        assert_eq!(doc.text().to_string(), "Xb\n");
+        assert_eq!(doc.version(), 2);
     }
 }

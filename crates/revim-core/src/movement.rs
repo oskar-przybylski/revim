@@ -12,9 +12,9 @@
 //! use ropey::Rope;
 //!
 //! let text = Rope::from_str("fn main() {\n    run();\n}\n");
-//! let pos = right(&text, 0);            // 'n'
+//! let pos = right(&text, 0, false);            // 'n'
 //! let col = column(&text, pos);         // 1
-//! assert_eq!(down(&text, pos, col), 13); // second line, column 1
+//! assert_eq!(down(&text, pos, col, false), 13); // second line, column 1
 //! ```
 
 use ropey::{Rope, RopeSlice};
@@ -30,7 +30,122 @@ pub enum Motion {
     Up,
     /// One line down (`j`), see [`down`].
     Down,
+    /// To the end of the line (`$`), see [`line_end`].
+    LineEnd,
+    /// To the start of the line (`0`), see [`line_start`].
+    LineStart,
+    /// To the first non-blank char of the line (`^`), see [`first_non_white`].
+    FirstNonWhite,
+    /// To the first non-blank char of the last line (`G`), see [`last_line`].
+    LastLine,
+    /// To the first char of the next WORD (`W`), see [`next_big_word`].
+    NextBigWord,
 }
+
+/// `$`: moves to the end of the line, never onto the line ending (`\n` or `\r\n`).
+///
+/// Without `past_end` (Normal) onto the last char of the line; with `past_end` (Insert)
+/// after it, where typed text is appended. On an empty line the position does not change.
+///
+/// ```
+/// use revim_core::movement::line_end;
+/// use ropey::Rope;
+///
+/// let text = Rope::from_str("abc\nde");
+/// assert_eq!(line_end(&text, 0, false), 2); // Normal: on 'c'
+/// assert_eq!(line_end(&text, 0, true), 3); // Insert: after 'c'
+/// assert_eq!(line_end(&text, 4, false), 5); // last line without '\n': on 'e'
+/// ```
+pub fn line_end(text: &Rope, pos: usize, past_end: bool) -> usize {
+    pos_in_line(text, text.char_to_line(pos), usize::MAX, past_end)
+}
+
+/// `0`: moves to the first char of the line (column 0), also on blanks.
+///
+/// ```
+/// use revim_core::movement::line_start;
+/// use ropey::Rope;
+///
+/// let text = Rope::from_str("abc\n  de");
+/// assert_eq!(line_start(&text, 2), 0);
+/// assert_eq!(line_start(&text, 7), 4); // on the first blank, not on 'd'
+/// ```
+pub fn line_start(text: &Rope, pos: usize) -> usize {
+    text.line_to_char(text.char_to_line(pos))
+}
+
+/// `W`: moves to the first char of the next WORD, also across lines.
+///
+/// A WORD is a run of non-whitespace chars, so punctuation does not split it (`foo-bar.baz`
+/// is one WORD). Skips the rest of the current WORD, then the whitespace after it (line
+/// endings included). With no WORD ahead it stops on the last char of the text.
+///
+/// Unlike Vim, empty lines are skipped like any other whitespace instead of being stopped on.
+///
+/// ```
+/// use revim_core::movement::next_big_word;
+/// use ropey::Rope;
+///
+/// let text = Rope::from_str("a-b.c  d\n  e");
+/// assert_eq!(next_big_word(&text, 0), 7); // 'a' → 'd', punctuation does not stop it
+/// assert_eq!(next_big_word(&text, 5), 7); // from the blanks
+/// assert_eq!(next_big_word(&text, 7), 11); // 'd' → 'e' on the next line
+/// assert_eq!(next_big_word(&text, 11), 11); // no WORD ahead → stays on the last char
+/// ```
+pub fn next_big_word(text: &Rope, pos: usize) -> usize {
+    let skip_non_ws = text
+        .chars_at(pos)
+        .position(|c| c.is_whitespace())
+        .unwrap_or(text.len_chars() - pos);
+
+    let skip = text
+        .chars_at(pos + skip_non_ws)
+        .position(|c| !c.is_whitespace())
+        .unwrap_or(text.len_chars());
+
+    clamp_cursor(text, pos + skip_non_ws + skip, false)
+}
+
+/// `^`: moves to the first char of the line that is not whitespace.
+///
+/// On a line of only whitespace onto its last char (as in Vim); on an empty line the position
+/// does not change. The cursor always ends up on a char, also in Insert, so there is no
+/// `past_end`.
+///
+/// ```
+/// use revim_core::movement::first_non_white;
+/// use ropey::Rope;
+///
+/// let text = Rope::from_str("  ab\n   \n");
+/// assert_eq!(first_non_white(&text, 0), 2); // on 'a'
+/// assert_eq!(first_non_white(&text, 3), 2); // also from the right
+/// assert_eq!(first_non_white(&text, 5), 7); // only blanks → on the last one
+/// ```
+pub fn first_non_white(text: &Rope, pos: usize) -> usize {
+    let line_idx = text.char_to_line(pos);
+    let line = text.line(line_idx);
+    let col = line
+        .chars()
+        .position(|c| !c.is_whitespace())
+        .unwrap_or(usize::MAX);
+    pos_in_line(text, line_idx, col, false)
+}
+
+/// `G`: moves to the first non-blank char of the last line, see [`first_non_white`].
+///
+/// A trailing line ending does not start a new line (see [`line_count`]).
+///
+/// ```
+/// use revim_core::movement::last_line;
+/// use ropey::Rope;
+///
+/// assert_eq!(last_line(&Rope::from_str("ab\n  cd\n")), 5); // on 'c'
+/// assert_eq!(last_line(&Rope::from_str("ab\n\n")), 3); // trailing empty line
+/// ```
+pub fn last_line(text: &Rope) -> usize {
+    first_non_white(text, text.line_to_char(line_count(text) - 1))
+}
+
 /// `h`: moves one char left; does not wrap to the previous line.
 ///
 /// ```
@@ -52,24 +167,31 @@ pub fn left(text: &Rope, pos: usize) -> usize {
     }
 }
 
-/// `l`: moves one char right; stops on the last char of the line, never on the line ending
-/// (`\n` or `\r\n`), as in Vim's Normal mode. On an empty line the position does not change.
+/// `l`: moves one char right, never onto the line ending (`\n` or `\r\n`).
+///
+/// Without `past_end` (Normal) it stops on the last char of the line; with `past_end`
+/// (Insert) it may go one further, after the last char, where typed text is appended. On an
+/// empty line the position does not change in Normal.
 ///
 /// ```
 /// use revim_core::movement::right;
 /// use ropey::Rope;
 ///
 /// let text = Rope::from_str("abc\nde");
-/// assert_eq!(right(&text, 0), 1);
-/// assert_eq!(right(&text, 2), 2); // 'c' is the last char of the line → stays
+/// assert_eq!(right(&text, 0, false), 1);
+/// assert_eq!(right(&text, 2, false), 2); // Normal: 'c' is the last char of the line → stays
+/// assert_eq!(right(&text, 2, true), 3); // Insert: after 'c'
+/// assert_eq!(right(&text, 3, true), 3); // and no further
 /// ```
-pub fn right(text: &Rope, pos: usize) -> usize {
+pub fn right(text: &Rope, pos: usize, past_end: bool) -> usize {
     let line = text.char_to_line(pos);
-    let last = text.line_to_char(line) + line_content_len(text.line(line)).saturating_sub(1);
+    let last = text.line_to_char(line) + last_col(line_content_len(text.line(line)), past_end);
     if pos < last { pos + 1 } else { pos }
 }
 
-/// `j`: moves one line down to column `col`, or to the last char if the line is shorter.
+/// `j`: moves one line down to column `col`, or to the last valid column if the line is
+/// shorter: its last char without `past_end` (Normal), after its last char with `past_end`
+/// (Insert).
 ///
 /// `col` is the column to aim for (Vim's "sticky" column): pass the column the vertical
 /// movement started from, so that moving through short lines does not lose it.
@@ -81,36 +203,39 @@ pub fn right(text: &Rope, pos: usize) -> usize {
 /// use ropey::Rope;
 ///
 /// let text = Rope::from_str("abc\nde\nfghij\n");
-/// assert_eq!(down(&text, 2, 2), 5);  // "de" is shorter → its last char 'e'
-/// assert_eq!(down(&text, 5, 2), 9);  // back to column 2 → 'h'
-/// assert_eq!(down(&text, 9, 2), 9);  // last line → stays
+/// assert_eq!(down(&text, 2, 2, false), 5);  // "de" is shorter → its last char 'e'
+/// assert_eq!(down(&text, 5, 2, false), 9);  // back to column 2 → 'h'
+/// assert_eq!(down(&text, 9, 2, false), 9);  // last line → stays
+/// assert_eq!(down(&text, 3, 3, true), 6);   // Insert: after "de"
 /// ```
-pub fn down(text: &Rope, pos: usize, col: usize) -> usize {
+pub fn down(text: &Rope, pos: usize, col: usize, past_end: bool) -> usize {
     let line_idx = text.char_to_line(pos);
     let next_idx = line_idx + 1;
     if next_idx >= line_count(text) {
         return pos;
     }
-    pos_in_line(text, next_idx, col)
+    pos_in_line(text, next_idx, col, past_end)
 }
 
-/// `k`: moves one line up to column `col`, or to the last char if the line is shorter.
-/// On the first line the position does not change. See [`down`] for `col`.
+/// `k`: moves one line up to column `col`, or to the last valid column if the line is
+/// shorter (see [`down`] for `col` and `past_end`). On the first line the position does not
+/// change.
 ///
 /// ```
 /// use revim_core::movement::up;
 /// use ropey::Rope;
 ///
 /// let text = Rope::from_str("ab\nabcdef");
-/// assert_eq!(up(&text, 8, 5), 1); // "ab" is shorter → its last char 'b'
-/// assert_eq!(up(&text, 1, 1), 1); // first line → stays
+/// assert_eq!(up(&text, 8, 5, false), 1); // "ab" is shorter → its last char 'b'
+/// assert_eq!(up(&text, 1, 1, false), 1); // first line → stays
+/// assert_eq!(up(&text, 8, 5, true), 2);  // Insert: after "ab"
 /// ```
-pub fn up(text: &Rope, pos: usize, col: usize) -> usize {
+pub fn up(text: &Rope, pos: usize, col: usize, past_end: bool) -> usize {
     let line_idx = text.char_to_line(pos);
     let Some(prev_idx) = line_idx.checked_sub(1) else {
         return pos;
     };
-    pos_in_line(text, prev_idx, col)
+    pos_in_line(text, prev_idx, col, past_end)
 }
 
 /// Number of chars in `line` without its line ending (`\n` or `\r\n`).
@@ -125,11 +250,18 @@ fn line_content_len(line: RopeSlice) -> usize {
     n
 }
 
-/// Position in line `line_idx` at column `col`, clamped to the last char of the line.
-fn pos_in_line(text: &Rope, line_idx: usize, col: usize) -> usize {
+/// Last column the cursor may stand on in a line of `len` chars (without the line ending):
+/// after the last char with `past_end` (Insert), on it without (Normal; 0 on an empty line).
+fn last_col(len: usize, past_end: bool) -> usize {
+    if past_end { len } else { len.saturating_sub(1) }
+}
+
+/// Position in line `line_idx` at column `col`, clamped to the last valid column
+/// ([`last_col`]).
+fn pos_in_line(text: &Rope, line_idx: usize, col: usize, past_end: bool) -> usize {
     let start = text.line_to_char(line_idx);
     let len = line_content_len(text.line(line_idx));
-    start + col.min(len.saturating_sub(1))
+    start + col.min(last_col(len, past_end))
 }
 
 /// Number of lines as Vim counts them: a trailing line ending does not start a new line.
@@ -165,6 +297,30 @@ pub fn column(text: &Rope, pos: usize) -> usize {
     pos - text.line_to_char(line_idx)
 }
 
+/// Nearest valid cursor position to `pos`, on the same line when possible.
+///
+/// With `past_end` (Insert) the cursor may stand after the last char of a line; without it
+/// (Normal) it stands on a char, except on an empty line. Never on the line ending (`\n` or
+/// `\r\n`) and never on the line after a trailing line ending, which is not a line (see
+/// [`line_count`]). A `pos` past the end of the text is treated as the end of the text.
+///
+/// ```
+/// use revim_core::movement::clamp_cursor;
+/// use ropey::Rope;
+///
+/// let text = Rope::from_str("abc\n");
+/// assert_eq!(clamp_cursor(&text, 3, false), 2); // Normal: from '\n' onto 'c'
+/// assert_eq!(clamp_cursor(&text, 3, true), 3); // Insert: after 'c' is fine
+/// assert_eq!(clamp_cursor(&text, 4, true), 3); // not on the line after the trailing '\n'
+/// ```
+pub fn clamp_cursor(text: &Rope, pos: usize, past_end: bool) -> usize {
+    let pos = pos.min(text.len_chars());
+    let line = text.char_to_line(pos).min(line_count(text) - 1);
+    let start = text.line_to_char(line);
+    let len = line_content_len(text.line(line));
+    start + (pos - start).min(last_col(len, past_end))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,50 +337,50 @@ mod tests {
 
     #[test]
     fn right_stops_on_last_char_not_newline() {
-        assert_eq!(right(&text(), 1), 2);
-        assert_eq!(right(&text(), 2), 2);
-        assert_eq!(right(&text(), 7), 7);
-        assert_eq!(right(&text(), 12), 12);
+        assert_eq!(right(&text(), 1, false), 2);
+        assert_eq!(right(&text(), 2, false), 2);
+        assert_eq!(right(&text(), 7, false), 7);
+        assert_eq!(right(&text(), 12, false), 12);
     }
 
     #[test]
     fn down_clamps_to_shorter_lines_and_keeps_column() {
-        assert_eq!(down(&text(), 2, 2), 5);
-        assert_eq!(down(&text(), 5, 2), 7);
-        assert_eq!(down(&text(), 7, 2), 10);
-        assert_eq!(down(&text(), 10, 2), 10);
+        assert_eq!(down(&text(), 2, 2, false), 5);
+        assert_eq!(down(&text(), 5, 2, false), 7);
+        assert_eq!(down(&text(), 7, 2, false), 10);
+        assert_eq!(down(&text(), 10, 2, false), 10);
     }
 
     #[test]
     fn up_mirrors_down() {
-        assert_eq!(up(&text(), 10, 2), 7);
-        assert_eq!(up(&text(), 1, 1), 1);
+        assert_eq!(up(&text(), 10, 2, false), 7);
+        assert_eq!(up(&text(), 1, 1, false), 1);
     }
 
     #[test]
     fn up_clamps_to_shorter_line() {
         let r = Rope::from_str("ab\nabcdef\n");
         let pos = r.line_to_char(1) + 5;
-        assert_eq!(up(&r, pos, 5), 1);
+        assert_eq!(up(&r, pos, 5, false), 1);
     }
 
     #[test]
     fn up_on_first_line_stays() {
         let r = Rope::from_str("abc\n");
-        assert_eq!(up(&r, 2, 2), 2);
+        assert_eq!(up(&r, 2, 2, false), 2);
     }
 
     #[test]
     fn up_to_empty_line() {
         let r = Rope::from_str("\nabc\n");
-        assert_eq!(up(&r, 3, 2), 0);
+        assert_eq!(up(&r, 3, 2, false), 0);
     }
 
     #[test]
     fn up_handles_crlf() {
         let r = Rope::from_str("ab\r\nabcd\r\n");
         let pos = r.line_to_char(1) + 3;
-        assert_eq!(up(&r, pos, 3), 1);
+        assert_eq!(up(&r, pos, 3, false), 1);
     }
 
     #[test]
@@ -235,43 +391,48 @@ mod tests {
 
     #[test]
     fn right_moves_from_line_start() {
-        assert_eq!(right(&text(), 0), 1);
-        assert_eq!(right(&text(), 4), 5);
+        assert_eq!(right(&text(), 0, false), 1);
+        assert_eq!(right(&text(), 4, false), 5);
     }
 
     #[test]
     fn right_does_not_step_onto_carriage_return() {
         // a0 b1 \r2 \n3 | c4 d5 \r6 \n7
         let r = Rope::from_str("ab\r\ncd\r\n");
-        assert_eq!(right(&r, 0), 1);
-        assert_eq!(right(&r, 1), 1);
+        assert_eq!(right(&r, 0, false), 1);
+        assert_eq!(right(&r, 1, false), 1);
     }
 
     #[test]
     fn right_on_empty_crlf_line_stays() {
         // a0 \r1 \n2 | \r3 \n4 | b5
         let r = Rope::from_str("a\r\n\r\nb");
-        assert_eq!(right(&r, 3), 3);
+        assert_eq!(right(&r, 3, false), 3);
     }
 
     #[test]
     fn down_does_not_enter_line_after_trailing_newline() {
         let r = Rope::from_str("abc\n");
-        assert_eq!(down(&r, 1, 1), 1);
+        assert_eq!(down(&r, 1, 1, false), 1);
     }
 
     #[test]
     fn down_enters_trailing_blank_line() {
         // "abc\n\n" is two lines in Vim: "abc" and an empty one
         let r = Rope::from_str("abc\n\n");
-        assert_eq!(down(&r, 1, 1), 4);
+        assert_eq!(down(&r, 1, 1, false), 4);
     }
 
     #[test]
     fn single_newline_is_one_empty_line() {
         let r = Rope::from_str("\n");
         assert_eq!(
-            (left(&r, 0), right(&r, 0), up(&r, 0, 0), down(&r, 0, 0)),
+            (
+                left(&r, 0),
+                right(&r, 0, false),
+                up(&r, 0, 0, false),
+                down(&r, 0, 0, false)
+            ),
             (0, 0, 0, 0)
         );
     }
@@ -280,9 +441,9 @@ mod tests {
     fn down_and_up_skip_carriage_return_when_clamping() {
         // a0 b1 c2 d3 \r4 \n5 | a6 b7 \r8 \n9 | a10 b11 c12 d13 \r14 \n15
         let r = Rope::from_str("abcd\r\nab\r\nabcd\r\n");
-        assert_eq!(down(&r, 3, 3), 7); // 'b', not '\r'
-        assert_eq!(down(&r, 7, 3), 13); // back to column 3
-        assert_eq!(up(&r, 13, 3), 7);
+        assert_eq!(down(&r, 3, 3, false), 7); // 'b', not '\r'
+        assert_eq!(down(&r, 7, 3, false), 13); // back to column 3
+        assert_eq!(up(&r, 13, 3, false), 7);
         assert_eq!(column(&r, 13), 3);
     }
 
@@ -290,18 +451,18 @@ mod tests {
     fn down_from_empty_crlf_line() {
         // a0 \r1 \n2 | \r3 \n4 | b5
         let r = Rope::from_str("a\r\n\r\nb");
-        assert_eq!(down(&r, 0, 0), 3);
-        assert_eq!(down(&r, 3, 0), 5);
+        assert_eq!(down(&r, 0, 0, false), 3);
+        assert_eq!(down(&r, 3, 0, false), 5);
     }
 
     #[test]
     fn movement_counts_chars_not_bytes() {
         // α0 β1 γ2 δ3 \n4 | a5 b6 — each Greek letter is 2 bytes in UTF-8
         let r = Rope::from_str("αβγδ\nab");
-        assert_eq!(right(&r, 0), 1);
-        assert_eq!(right(&r, 3), 3);
+        assert_eq!(right(&r, 0, false), 1);
+        assert_eq!(right(&r, 3, false), 3);
         assert_eq!(left(&r, 5), 5);
-        assert_eq!(down(&r, 3, 3), 6);
+        assert_eq!(down(&r, 3, 3, false), 6);
         assert_eq!(column(&r, 6), 1);
     }
 
@@ -309,17 +470,255 @@ mod tests {
     #[test]
     fn only_newline_breaks_lines() {
         // a0 \x0C1 b2 \n3 | c4  — form feed is not a line break
-        assert_eq!(down(&Rope::from_str("a\x0Cb\nc"), 0, 0), 4);
+        assert_eq!(down(&Rope::from_str("a\x0Cb\nc"), 0, 0, false), 4);
         // a0 \r1 b2 \n3 | c4  — a lone '\r' is not a line break
-        assert_eq!(down(&Rope::from_str("a\rb\nc"), 0, 0), 4);
+        assert_eq!(down(&Rope::from_str("a\rb\nc"), 0, 0, false), 4);
     }
 
     #[test]
     fn empty_text_stays_at_zero() {
         let t = Rope::from_str("");
         assert_eq!(
-            (left(&t, 0), right(&t, 0), up(&t, 0, 0), down(&t, 0, 0)),
+            (
+                left(&t, 0),
+                right(&t, 0, false),
+                up(&t, 0, 0, false),
+                down(&t, 0, 0, false)
+            ),
             (0, 0, 0, 0)
         );
+    }
+
+    #[test]
+    fn clamp_keeps_valid_positions() {
+        // a0 b1 c2 \n3 | d4 e5 \n6 | \n7 | f8 g9 h10 i11 j12
+        for pos in [0, 2, 4, 5, 7, 8, 12] {
+            assert_eq!(clamp_cursor(&text(), pos, false), pos, "{pos}");
+            assert_eq!(clamp_cursor(&text(), pos, true), pos, "{pos}");
+        }
+    }
+
+    #[test]
+    fn clamp_moves_off_the_line_ending_in_normal() {
+        assert_eq!(clamp_cursor(&text(), 3, false), 2);
+        assert_eq!(clamp_cursor(&text(), 6, false), 5);
+    }
+
+    #[test]
+    fn clamp_allows_after_the_last_char_in_insert() {
+        assert_eq!(clamp_cursor(&text(), 3, true), 3);
+        assert_eq!(clamp_cursor(&text(), 6, true), 6);
+        assert_eq!(clamp_cursor(&text(), 13, true), 13); // end of text without '\n'
+    }
+
+    #[test]
+    fn clamp_past_the_end_of_text() {
+        assert_eq!(clamp_cursor(&text(), 100, false), 12);
+        assert_eq!(clamp_cursor(&text(), 100, true), 13);
+    }
+
+    #[test]
+    fn clamp_on_empty_line_stays() {
+        assert_eq!(clamp_cursor(&text(), 7, false), 7);
+        assert_eq!(clamp_cursor(&text(), 7, true), 7);
+    }
+
+    #[test]
+    fn clamp_never_on_the_line_after_trailing_newline() {
+        let text = Rope::from_str("ab\n");
+        assert_eq!(clamp_cursor(&text, 3, false), 1);
+        assert_eq!(clamp_cursor(&text, 3, true), 2);
+    }
+
+    #[test]
+    fn clamp_skips_carriage_return() {
+        // a0 b1 \r2 \n3
+        let text = Rope::from_str("ab\r\n");
+        assert_eq!(clamp_cursor(&text, 2, false), 1);
+        assert_eq!(clamp_cursor(&text, 3, false), 1);
+        assert_eq!(clamp_cursor(&text, 3, true), 2);
+    }
+
+    #[test]
+    fn clamp_in_empty_text() {
+        let text = Rope::new();
+        assert_eq!(clamp_cursor(&text, 0, false), 0);
+        assert_eq!(clamp_cursor(&text, 5, true), 0);
+    }
+
+    #[test]
+    fn right_in_insert_goes_after_the_last_char() {
+        // a0 b1 c2 \n3 | d4 e5 \n6 | \n7 | f8 g9 h10 i11 j12
+        assert_eq!(right(&text(), 2, true), 3);
+        assert_eq!(right(&text(), 3, true), 3); // not onto the next line
+        assert_eq!(right(&text(), 12, true), 13); // last line without '\n'
+        assert_eq!(right(&text(), 13, true), 13);
+    }
+
+    #[test]
+    fn right_in_insert_on_empty_line_stays() {
+        assert_eq!(right(&text(), 7, true), 7);
+    }
+
+    #[test]
+    fn right_in_insert_does_not_step_between_carriage_return_and_newline() {
+        // a0 b1 \r2 \n3
+        let r = Rope::from_str("ab\r\n");
+        assert_eq!(right(&r, 1, true), 2);
+        assert_eq!(right(&r, 2, true), 2);
+    }
+
+    #[test]
+    fn down_and_up_in_insert_keep_the_column_after_the_last_char() {
+        // a0 b1 c2 d3 \n4 | e5 f6 \n7 | g8 h9 i10 j11 \n12
+        let r = Rope::from_str("abcd\nef\nghij\n");
+        assert_eq!(down(&r, 4, 4, true), 7); // after "ef"
+        assert_eq!(down(&r, 7, 4, true), 12); // back to column 4: after "ghij"
+        assert_eq!(up(&r, 12, 4, true), 7);
+        assert_eq!(down(&r, 4, 4, false), 6); // Normal: on 'f'
+    }
+
+    #[test]
+    fn line_end_stops_on_the_last_char_in_normal() {
+        // a0 b1 c2 \n3 | d4 e5 \n6 | \n7 | f8 g9 h10 i11 j12
+        assert_eq!(line_end(&text(), 0, false), 2);
+        assert_eq!(line_end(&text(), 2, false), 2);
+        assert_eq!(line_end(&text(), 4, false), 5);
+        assert_eq!(line_end(&text(), 8, false), 12); // last line without '\n'
+    }
+
+    #[test]
+    fn line_end_goes_after_the_last_char_in_insert() {
+        assert_eq!(line_end(&text(), 0, true), 3);
+        assert_eq!(line_end(&text(), 3, true), 3); // already there
+        assert_eq!(line_end(&text(), 8, true), 13);
+    }
+
+    #[test]
+    fn line_end_on_empty_line_stays() {
+        assert_eq!(line_end(&text(), 7, false), 7);
+        assert_eq!(line_end(&text(), 7, true), 7);
+    }
+
+    #[test]
+    fn line_end_skips_carriage_return() {
+        // a0 b1 \r2 \n3
+        let r = Rope::from_str("ab\r\n");
+        assert_eq!(line_end(&r, 0, false), 1);
+        assert_eq!(line_end(&r, 0, true), 2);
+    }
+
+    #[test]
+    fn line_end_counts_chars_not_bytes() {
+        let r = Rope::from_str("αβγδ\nab");
+        assert_eq!(line_end(&r, 0, false), 3);
+        assert_eq!(line_end(&r, 0, true), 4);
+    }
+
+    #[test]
+    fn line_start_goes_to_column_zero() {
+        assert_eq!(line_start(&text(), 2), 0);
+        assert_eq!(line_start(&text(), 5), 4);
+        assert_eq!(line_start(&text(), 7), 7); // empty line
+        assert_eq!(line_start(&text(), 13), 8); // after the last char in Insert
+    }
+
+    #[test]
+    fn line_start_and_end_in_empty_text() {
+        let t = Rope::new();
+        assert_eq!(line_start(&t, 0), 0);
+        assert_eq!(line_end(&t, 0, false), 0);
+        assert_eq!(line_end(&t, 0, true), 0);
+    }
+
+    #[test]
+    fn first_non_white_skips_leading_blanks() {
+        // ␠0 ␠1 a2 b3 \n4 | \t5 ␠6 c7 \n8
+        let r = Rope::from_str("  ab\n\t c\n");
+        assert_eq!(first_non_white(&r, 0), 2);
+        assert_eq!(first_non_white(&r, 3), 2); // from the right of the first non-blank
+        assert_eq!(first_non_white(&r, 5), 7); // tab and space
+    }
+
+    #[test]
+    fn first_non_white_without_indent_goes_to_column_zero() {
+        // a0 b1 c2 \n3 | d4 e5 \n6 | \n7 | f8 g9 h10 i11 j12
+        assert_eq!(first_non_white(&text(), 2), 0);
+        assert_eq!(first_non_white(&text(), 12), 8); // last line without '\n'
+        assert_eq!(first_non_white(&text(), 13), 8); // after the last char in Insert
+    }
+
+    #[test]
+    fn first_non_white_on_blank_line_goes_to_the_last_blank() {
+        // ␠0 ␠1 ␠2 \n3 | x4
+        let r = Rope::from_str("   \nx");
+        assert_eq!(first_non_white(&r, 0), 2);
+        assert_eq!(first_non_white(&r, 3), 2); // from the '\n' (Insert after the last blank)
+    }
+
+    #[test]
+    fn first_non_white_on_empty_line_stays() {
+        assert_eq!(first_non_white(&text(), 7), 7);
+    }
+
+    #[test]
+    fn first_non_white_skips_carriage_return() {
+        // ␠0 ␠1 \r2 \n3
+        let r = Rope::from_str("  \r\n");
+        assert_eq!(first_non_white(&r, 0), 1); // last blank, not '\r'
+    }
+
+    #[test]
+    fn first_non_white_counts_chars_not_bytes() {
+        // ␠0 ␠1 α2 β3
+        let r = Rope::from_str("  αβ");
+        assert_eq!(first_non_white(&r, 3), 2);
+    }
+
+    #[test]
+    fn first_non_white_in_empty_text() {
+        assert_eq!(first_non_white(&Rope::new(), 0), 0);
+    }
+
+    #[test]
+    fn down_in_insert_does_not_enter_line_after_trailing_newline() {
+        let r = Rope::from_str("ab\n");
+        assert_eq!(down(&r, 2, 2, true), 2);
+    }
+
+    #[test]
+    fn next_big_word_skips_trailing_blanks_at_the_end() {
+        // a0 b1 ␠2 ␠3 \n4: no WORD ahead → on the last blank
+        let r = Rope::from_str("ab  \n");
+        assert_eq!(next_big_word(&r, 0), 3);
+    }
+
+    #[test]
+    fn next_big_word_skips_empty_lines() {
+        // a0 \n1 | \n2 | b3
+        let r = Rope::from_str("a\n\nb");
+        assert_eq!(next_big_word(&r, 0), 3);
+    }
+
+    #[test]
+    fn next_big_word_handles_crlf() {
+        // a0 \r1 \n2 | b3
+        let r = Rope::from_str("a\r\nb");
+        assert_eq!(next_big_word(&r, 0), 3);
+    }
+
+    #[test]
+    fn next_big_word_on_empty_text_stays() {
+        assert_eq!(next_big_word(&Rope::new(), 0), 0);
+    }
+
+    #[test]
+    fn last_line_without_trailing_newline() {
+        assert_eq!(last_line(&text()), 8);
+    }
+
+    #[test]
+    fn last_line_on_empty_text() {
+        assert_eq!(last_line(&Rope::new()), 0);
     }
 }
