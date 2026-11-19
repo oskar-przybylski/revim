@@ -180,6 +180,8 @@ fn to_key(event: &KeyEvent) -> Option<Key> {
         KeyCode::Esc => Key::Esc,
         KeyCode::Enter => Key::Enter,
         KeyCode::Backspace => Key::Backspace,
+        KeyCode::Home => Key::Home,
+        KeyCode::End => Key::End,
         KeyCode::Tab => Key::Tab,
         _ => return None,
     };
