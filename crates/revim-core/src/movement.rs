@@ -36,6 +36,10 @@ pub enum Motion {
     LineStart,
     /// To the first non-blank char of the line (`^`), see [`first_non_white`].
     FirstNonWhite,
+    /// To the first non-blank char of the last line (`G`), see [`last_line`].
+    LastLine,
+    /// To the first char of the next WORD (`W`), see [`next_big_word`].
+    NextBigWord,
 }
 
 /// `$`: moves to the end of the line, never onto the line ending (`\n` or `\r\n`).
@@ -70,6 +74,38 @@ pub fn line_start(text: &Rope, pos: usize) -> usize {
     text.line_to_char(text.char_to_line(pos))
 }
 
+/// `W`: moves to the first char of the next WORD, also across lines.
+///
+/// A WORD is a run of non-whitespace chars, so punctuation does not split it (`foo-bar.baz`
+/// is one WORD). Skips the rest of the current WORD, then the whitespace after it (line
+/// endings included). With no WORD ahead it stops on the last char of the text.
+///
+/// Unlike Vim, empty lines are skipped like any other whitespace instead of being stopped on.
+///
+/// ```
+/// use revim_core::movement::next_big_word;
+/// use ropey::Rope;
+///
+/// let text = Rope::from_str("a-b.c  d\n  e");
+/// assert_eq!(next_big_word(&text, 0), 7); // 'a' → 'd', punctuation does not stop it
+/// assert_eq!(next_big_word(&text, 5), 7); // from the blanks
+/// assert_eq!(next_big_word(&text, 7), 11); // 'd' → 'e' on the next line
+/// assert_eq!(next_big_word(&text, 11), 11); // no WORD ahead → stays on the last char
+/// ```
+pub fn next_big_word(text: &Rope, pos: usize) -> usize {
+    let skip_non_ws = text
+        .chars_at(pos)
+        .position(|c| c.is_whitespace())
+        .unwrap_or(text.len_chars() - pos);
+
+    let skip = text
+        .chars_at(pos + skip_non_ws)
+        .position(|c| !c.is_whitespace())
+        .unwrap_or(text.len_chars());
+
+    clamp_cursor(text, pos + skip_non_ws + skip, false)
+}
+
 /// `^`: moves to the first char of the line that is not whitespace.
 ///
 /// On a line of only whitespace onto its last char (as in Vim); on an empty line the position
@@ -93,6 +129,21 @@ pub fn first_non_white(text: &Rope, pos: usize) -> usize {
         .position(|c| !c.is_whitespace())
         .unwrap_or(usize::MAX);
     pos_in_line(text, line_idx, col, false)
+}
+
+/// `G`: moves to the first non-blank char of the last line, see [`first_non_white`].
+///
+/// A trailing line ending does not start a new line (see [`line_count`]).
+///
+/// ```
+/// use revim_core::movement::last_line;
+/// use ropey::Rope;
+///
+/// assert_eq!(last_line(&Rope::from_str("ab\n  cd\n")), 5); // on 'c'
+/// assert_eq!(last_line(&Rope::from_str("ab\n\n")), 3); // trailing empty line
+/// ```
+pub fn last_line(text: &Rope) -> usize {
+    first_non_white(text, text.line_to_char(line_count(text) - 1))
 }
 
 /// `h`: moves one char left; does not wrap to the previous line.
@@ -633,5 +684,41 @@ mod tests {
     fn down_in_insert_does_not_enter_line_after_trailing_newline() {
         let r = Rope::from_str("ab\n");
         assert_eq!(down(&r, 2, 2, true), 2);
+    }
+
+    #[test]
+    fn next_big_word_skips_trailing_blanks_at_the_end() {
+        // a0 b1 ␠2 ␠3 \n4: no WORD ahead → on the last blank
+        let r = Rope::from_str("ab  \n");
+        assert_eq!(next_big_word(&r, 0), 3);
+    }
+
+    #[test]
+    fn next_big_word_skips_empty_lines() {
+        // a0 \n1 | \n2 | b3
+        let r = Rope::from_str("a\n\nb");
+        assert_eq!(next_big_word(&r, 0), 3);
+    }
+
+    #[test]
+    fn next_big_word_handles_crlf() {
+        // a0 \r1 \n2 | b3
+        let r = Rope::from_str("a\r\nb");
+        assert_eq!(next_big_word(&r, 0), 3);
+    }
+
+    #[test]
+    fn next_big_word_on_empty_text_stays() {
+        assert_eq!(next_big_word(&Rope::new(), 0), 0);
+    }
+
+    #[test]
+    fn last_line_without_trailing_newline() {
+        assert_eq!(last_line(&text()), 8);
+    }
+
+    #[test]
+    fn last_line_on_empty_text() {
+        assert_eq!(last_line(&Rope::new()), 0);
     }
 }

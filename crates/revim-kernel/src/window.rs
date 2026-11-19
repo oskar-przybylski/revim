@@ -3,7 +3,8 @@
 use revim_core::{
     change::ChangeSet,
     movement::{
-        Motion, clamp_cursor, column, down, first_non_white, left, line_end, line_start, right, up,
+        Motion, clamp_cursor, column, down, first_non_white, last_line, left, line_end, line_start,
+        next_big_word, right, up,
     },
     selection::Selection,
 };
@@ -100,6 +101,8 @@ impl Window {
                 self.set_cursor(line_end(text, self.cursor(), past_end), Some(usize::MAX))
             }
             Motion::FirstNonWhite => self.set_cursor(first_non_white(text, self.cursor()), None),
+            Motion::LastLine => self.set_cursor(last_line(text), None),
+            Motion::NextBigWord => self.set_cursor(next_big_word(text, self.cursor()), None),
             Motion::Down => {
                 let col = self.desired_col.unwrap_or(column(text, self.cursor()));
                 let new_pos = down(text, self.cursor(), col, past_end);

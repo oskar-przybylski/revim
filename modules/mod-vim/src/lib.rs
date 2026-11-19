@@ -1,6 +1,8 @@
 //! Vim motions and commands.
 
-use revim_api::{ChangeSet, Ctx, Mode, Module, Motion, Registrar, Selection, Transaction};
+use revim_api::{
+    ChangeSet, Ctx, Mode, Module, Motion, Registrar, Selection, Transaction, line_end,
+};
 
 /// Vim-style editing: `h` `j` `k` `l` and the arrow keys move the cursor (arrows also in
 /// Insert), `i` enters Insert, `<Esc>` goes back to Normal.
@@ -42,6 +44,30 @@ impl Module for Vim {
             "Move cursor to first non white char in line",
             |cx, _| cx.move_cursor(Motion::FirstNonWhite),
         );
+        r.command("vim.move.last_line", "Move cursor to last line", |cx, _| {
+            cx.move_cursor(Motion::LastLine)
+        });
+        r.command(
+            "vim.move.plus",
+            "Move cursor to next line first non white char",
+            |cx, _| {
+                cx.move_cursor(Motion::Down);
+                cx.move_cursor(Motion::FirstNonWhite);
+            },
+        );
+        r.command(
+            "vim.move.minus",
+            "Move cursor to previous line first non white char",
+            |cx, _| {
+                cx.move_cursor(Motion::Up);
+                cx.move_cursor(Motion::FirstNonWhite);
+            },
+        );
+        r.command(
+            "vim.move.next_big_word",
+            "Move cursor to the next WORD",
+            |cx, _| cx.move_cursor(Motion::NextBigWord),
+        );
 
         r.command("vim.mode.normal", "Back to Normal mode", Vim::normal);
         r.command("vim.mode.insert", "Insert before the cursor", |cx, _| {
@@ -73,8 +99,17 @@ impl Module for Vim {
 
         r.keymap(Mode::Normal, "x", "vim.move.delete", "");
         r.keymap(Mode::Normal, "$", "vim.move.line_end", "");
+        r.keymap(Mode::Normal, "<End>", "vim.move.line_end", "");
+        r.keymap(Mode::Insert, "<End>", "vim.move.line_end", "");
         r.keymap(Mode::Normal, "0", "vim.move.line_start", "");
+        r.keymap(Mode::Normal, "<Home>", "vim.move.line_start", "");
+        r.keymap(Mode::Insert, "<Home>", "vim.move.line_start", "");
         r.keymap(Mode::Normal, "^", "vim.move.first_non_white", "");
+        r.keymap(Mode::Normal, "G", "vim.move.last_line", "");
+        r.keymap(Mode::Normal, "+", "vim.move.plus", "");
+        r.keymap(Mode::Normal, "<CR>", "vim.move.plus", "");
+        r.keymap(Mode::Normal, "-", "vim.move.minus", "");
+        r.keymap(Mode::Normal, "W", "vim.move.next_big_word", "");
 
         r.keymap(Mode::Normal, "i", "vim.mode.insert", "");
         r.keymap(Mode::Normal, "a", "vim.mode.append", "");
@@ -102,7 +137,7 @@ impl Vim {
             },
         };
         let pos = cx.state().focused_window().cursor();
-        let n = n.min(pos);
+        let n = n.min(line_end(cx.state().focused_doc().text(), pos, true) - pos);
         if n == 0 {
             return;
         }
@@ -264,5 +299,95 @@ mod tests {
         press(&mut ed, "i");
         assert!(!press(&mut ed, "l")); // typed text, handled by mod-builtin's fallback
         assert_eq!(cursor(&ed), 0);
+    }
+
+    #[test]
+    fn capital_w_jumps_over_punctuation_and_lines() {
+        // a0 -1 b2 ␠3 c4 \n5 | ␠6 d7 \n8
+        let mut ed = editor("a-b c\n d\n", vec![Box::new(Vim)]);
+        assert!(press(&mut ed, "W"));
+        assert_eq!(cursor(&ed), 4); // 'c'
+        press(&mut ed, "W");
+        assert_eq!(cursor(&ed), 7); // 'd' on the next line
+        press(&mut ed, "W");
+        assert_eq!(cursor(&ed), 7); // no WORD ahead → stays on the last char
+    }
+
+    #[test]
+    fn capital_g_goes_to_the_first_non_blank_of_the_last_line() {
+        // a0 \n1 | ␠2 b3 c4 \n5
+        let mut ed = editor("a\n bc\n", vec![Box::new(Vim)]);
+        assert!(press(&mut ed, "G"));
+        assert_eq!(cursor(&ed), 3);
+    }
+
+    #[test]
+    fn plus_enter_and_minus_go_to_the_first_non_blank() {
+        // a0 b1 c2 \n3 | ␠4 d5 \n6 | ␠7 ␠8 e9 \n10
+        let mut ed = editor("abc\n d\n  e\n", vec![Box::new(Vim)]);
+        press(&mut ed, "$");
+        assert!(press(&mut ed, "+"));
+        assert_eq!(cursor(&ed), 5); // 'd'
+        assert!(press(&mut ed, "<CR>"));
+        assert_eq!(cursor(&ed), 9); // 'e'
+        assert!(press(&mut ed, "-"));
+        assert_eq!(cursor(&ed), 5); // 'd'
+    }
+
+    #[test]
+    fn home_and_end_work_in_normal_and_insert() {
+        let mut ed = editor("  abc\n", vec![Box::new(Vim)]);
+        assert!(press(&mut ed, "<End>"));
+        assert_eq!(cursor(&ed), 4); // Normal: on 'c'
+        assert!(press(&mut ed, "<Home>"));
+        assert_eq!(cursor(&ed), 0);
+        press(&mut ed, "i");
+        assert!(press(&mut ed, "<End>"));
+        assert_eq!(cursor(&ed), 5); // Insert: after 'c'
+        assert!(press(&mut ed, "<Home>"));
+        assert_eq!(cursor(&ed), 0);
+    }
+
+    #[test]
+    fn x_deletes_the_char_under_the_cursor() {
+        let mut ed = editor("abc\n", vec![Box::new(Vim)]);
+        press(&mut ed, "l");
+        assert!(press(&mut ed, "x"));
+        assert_eq!(ed.state().focused_doc().text().to_string(), "ac\n");
+    }
+
+    #[test]
+    fn x_on_an_empty_line_does_nothing() {
+        let mut ed = editor("\nab\n", vec![Box::new(Vim)]);
+        press(&mut ed, "x");
+        assert_eq!(ed.state().focused_doc().text().to_string(), "\nab\n");
+    }
+
+    #[test]
+    fn x_on_an_empty_text_does_nothing() {
+        // an empty document is one empty line
+        let mut ed = editor("", vec![Box::new(Vim)]);
+        press(&mut ed, "x");
+        assert_eq!(ed.state().focused_doc().text().to_string(), "\n");
+    }
+
+    #[test]
+    fn x_with_a_count_stops_at_the_line_end() {
+        /// Binds `X` to `vim.move.delete` with a count, which `x` itself does not pass yet.
+        struct DeleteFive;
+        impl Module for DeleteFive {
+            fn id(&self) -> &'static str {
+                "delete-five"
+            }
+            fn register(&mut self, r: &mut revim_api::Registrar) {
+                r.keymap(Mode::Normal, "X", "vim.move.delete", "5");
+            }
+        }
+
+        // a0 b1 c2 \n3 | d4
+        let mut ed = editor("abc\nd\n", vec![Box::new(Vim), Box::new(DeleteFive)]);
+        press(&mut ed, "l");
+        assert!(press(&mut ed, "X"));
+        assert_eq!(ed.state().focused_doc().text().to_string(), "a\nd\n");
     }
 }

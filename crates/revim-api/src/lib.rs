@@ -102,7 +102,7 @@
 
 pub use revim_core::{
     change::{Assoc, ChangeSet, Op},
-    movement::Motion,
+    movement::{Motion, line_end},
     selection::{Range, Selection},
     transaction::Transaction,
 };
@@ -117,6 +117,15 @@ pub use revim_kernel::{
     state::{DocId, EditorState},
     window::{Window, WindowId},
 };
+
+/// Builds the module list for the editor, boxing each module:
+/// `modules![mod_vim::Vim, mod_gutter::Gutter]` is a `Vec<Box<dyn Module>>`.
+#[macro_export]
+macro_rules! modules {
+    ($($module:expr),* $(,)?) => {
+        ::std::vec![$(::std::boxed::Box::new($module) as ::std::boxed::Box<dyn $crate::Module>),*]
+    };
+}
 
 /// Helpers for testing modules without a terminal: build an editor with your module and
 /// press keys.
